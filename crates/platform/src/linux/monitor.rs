@@ -133,7 +133,9 @@ pub fn all() -> Vec<Monitor> {
 fn apply_work_areas(x: &crate::sys::x11::X, monitors: &mut [(bool, Monitor)]) {
     let per_monitor = x.prop32(x.root, x.atoms._GTK_WORKAREAS_D0);
     let areas: Vec<Rect> = per_monitor
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| Rect::from_xywh(c[0] as i32, c[1] as i32, c[2] as i32, c[3] as i32))
         .collect();
     if !areas.is_empty() {

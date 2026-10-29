@@ -368,7 +368,9 @@ mod linux {
             for row in 0..usize::from(rows) {
                 let line = &data[row * stride..row * stride + usize::from(w) * 4];
                 pixels.extend(
-                    line.chunks_exact(4)
+                    line.as_chunks::<4>()
+                        .0
+                        .iter()
                         .map(|c| 0xFF00_0000 | u32::from_le_bytes([c[0], c[1], c[2], 0])),
                 );
             }

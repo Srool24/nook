@@ -27,10 +27,12 @@ pub fn digest(data: &[u8]) -> [u8; 16] {
         msg.push(0);
     }
     msg.extend_from_slice(&bit_len.to_le_bytes());
-    for chunk in msg.chunks_exact(64) {
+    for chunk in msg.as_chunks::<64>().0 {
         let m: Vec<u32> = chunk
-            .chunks_exact(4)
-            .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|w| u32::from_le_bytes(*w))
             .collect();
         let (mut a, mut b, mut c, mut d) = (a0, b0, c0, d0);
         for i in 0..64 {

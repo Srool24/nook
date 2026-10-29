@@ -319,7 +319,7 @@ pub fn rasterize(shape: &HitShape, origin: (i32, i32)) -> Vec<Rectangle> {
                 }
             }
             xs.sort_by(f32::total_cmp);
-            for pair in xs.chunks_exact(2) {
+            for pair in xs.as_chunks::<2>().0 {
                 // Pixels whose centers fall between the crossings.
                 let l = (pair[0] - 0.5).ceil() as i32;
                 let r = (pair[1] - 0.5).floor() as i32 + 1;

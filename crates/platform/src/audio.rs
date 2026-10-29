@@ -298,8 +298,10 @@ mod linux {
                     samples.clear();
                     samples.extend(
                         bytes
-                            .chunks_exact(2)
-                            .map(|b| i16::from_le_bytes([b[0], b[1]])),
+                            .as_chunks::<2>()
+                            .0
+                            .iter()
+                            .map(|b| i16::from_le_bytes(*b)),
                     );
                     on_chunk(&samples);
                 }
