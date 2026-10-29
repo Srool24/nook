@@ -10,6 +10,7 @@ use super::manifest::{Found, Mode};
 use super::protocol::{self, Out};
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -19,6 +20,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 /// No console window flashing up for console programs (python, node, ...).
+#[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// A poll run that takes longer is killed.
 const POLL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -49,7 +51,7 @@ fn command(found: &Found, data_dir: &Path, dark: bool, accent: &str) -> Command 
         if looks_local && local.exists() {
             local.into_os_string()
         } else {
-            m.run[0].clone().into()
+            runtime(&m.run[0]).into()
         }
     };
     let mut cmd = Command::new(program);
@@ -71,17 +73,35 @@ fn command(found: &Found, data_dir: &Path, dark: bool, accent: &str) -> Command 
         .env("PYTHONIOENCODING", "utf-8")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .creation_flags(CREATE_NO_WINDOW);
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
     cmd
 }
 
-/// `%APPDATA%\Nook\plugin-data\<id>`, created on first use.
+/// The program to run for `name`. Manifests written on Windows say
+/// `python` or `py`; Linux distributions without `python-is-python3` only
+/// have `python3`.
+fn runtime(name: &str) -> String {
+    if cfg!(windows) || !matches!(name, "python" | "py") {
+        return name.to_owned();
+    }
+    let on_path = |p: &str| {
+        std::env::var_os("PATH")
+            .is_some_and(|path| std::env::split_paths(&path).any(|d| d.join(p).is_file()))
+    };
+    if name == "python" && on_path("python") {
+        name.to_owned()
+    } else {
+        "python3".to_owned()
+    }
+}
+
+/// `%APPDATA%\Nook\plugin-data\<id>` (`~/.config/nook/plugin-data/<id>`
+/// on Linux), created on first use.
 pub fn data_dir(id: &str) -> PathBuf {
-    let base = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    let dir = base.join("Nook").join("plugin-data").join(id);
+    let base = nook_platform::shell::app_dir().unwrap_or_else(|| std::env::temp_dir().join("Nook"));
+    let dir = base.join("plugin-data").join(id);
     if let Err(e) = std::fs::create_dir_all(&dir) {
         tracing::warn!("plugin data dir {}: {e}", dir.display());
     }

@@ -1,6 +1,6 @@
 [package]
 name = "nook-platform"
-description = "Thin, error-checked wrappers over the Win32/DWM APIs Nook needs"
+description = "Thin, error-checked wrappers over the Win32/DWM (Windows) and X11/portal/D-Bus (Linux) APIs Nook needs"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,13 +10,15 @@ anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 image.workspace = true
-windows-core = "0.62"
-windows-numerics = "0.3"
 candle-core = "0.9"
 candle-nn = "0.9"
 serde_json = "1.0.154"
 
-[dependencies.windows]
+[target.'cfg(windows)'.dependencies]
+windows-core = "0.62"
+windows-numerics = "0.3"
+
+[target.'cfg(windows)'.dependencies.windows]
 workspace = true
 features = [
   "Foundation",
@@ -69,3 +71,18 @@ features = [
   "Win32_UI_Shell_Common",
   "Win32_UI_WindowsAndMessaging",
 ]
+
+# Linux (Fedora GNOME): the overlay runs as an X11 client (XWayland on a
+# Wayland session), screen grabs and the wallpaper go through the desktop
+# portal, media, power and settings through D-Bus.
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.13", features = ["shape", "randr", "xfixes", "allow-unsafe-code"] }
+zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io"] }
+libc = "0.2"
+# Text in burned-in annotations, the snip overlay and font matching
+# (GDI on Windows).
+ab_glyph = "0.2"
+# Copying images and reading the clipboard (the X11 selection protocol).
+arboard = { version = "3.7", default-features = false, features = ["image-data"] }
+# Album art that players serve over HTTP(S).
+ureq = { version = "2.12", default-features = false, features = ["tls"] }

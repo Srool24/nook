@@ -169,9 +169,9 @@ impl Config {
     }
 }
 
+/// `%APPDATA%\Nook` on Windows, `~/.config/nook` on Linux.
 pub fn dir() -> Result<PathBuf> {
-    let appdata = std::env::var_os("APPDATA").context("APPDATA is not set")?;
-    Ok(PathBuf::from(appdata).join("Nook"))
+    nook_platform::shell::app_dir().context("no folder for settings (APPDATA or HOME is not set)")
 }
 
 pub fn path() -> Result<PathBuf> {

@@ -223,7 +223,11 @@ pub fn page(
             if row(&mut lui, "Accent", theme, |ui| {
                 widgets::segmented(
                     ui,
-                    &["Wallpaper", "Windows", "Custom"],
+                    &[
+                        "Wallpaper",
+                        if cfg!(windows) { "Windows" } else { "System" },
+                        "Custom",
+                    ],
                     &mut accent_idx,
                     theme,
                 )
@@ -625,7 +629,11 @@ fn advanced_body(ui: &mut Ui, rect: Rect, theme: &Theme, cfg: &mut Config, out: 
     }
     hint(
         &mut rui,
-        "Daily: version, opens, minutes, tools used",
+        if cfg!(windows) {
+            "Daily: version, opens, minutes, tools used"
+        } else {
+            "Never sent from the Linux build"
+        },
         theme,
     );
 }

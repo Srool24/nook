@@ -6,9 +6,13 @@
 //! Strokes are unions of capsules: each pixel takes the highest coverage of
 //! any segment of the stroke, so a translucent marker does not darken where
 //! its own segments overlap. Text goes through GDI (Segoe UI Semibold,
-//! greyscale anti-aliasing so it has no color fringes on any background).
+//! greyscale anti-aliasing so it has no color fringes on any background) on
+//! Windows and through `ab_glyph` with the system's semibold sans on Linux.
 
-use crate::{PlatformError, Result};
+#[cfg(windows)]
+use crate::PlatformError;
+use crate::Result;
+#[cfg(windows)]
 use windows::Win32::Foundation::{COLORREF, RECT, SIZE};
 use windows::Win32::Graphics::Gdi::{
     ANTIALIASED_QUALITY, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC,
@@ -50,6 +54,20 @@ fn blend(dst: u32, [r, g, b]: [u8; 3], alpha: f32) -> u32 {
 
 /// Width and height in pixels of one line of `text` as [`Canvas::text`]
 /// draws it at `size` pixels per em.
+#[cfg(target_os = "linux")]
+pub fn text_size(text: &str, size: f32) -> (f32, f32) {
+    match crate::sys::fonts::ui_semibold() {
+        Some(font) => {
+            let line = crate::sys::fonts::layout(&font, text, size.round().max(1.0));
+            (line.width.ceil(), line.height.ceil())
+        }
+        None => (text.chars().count() as f32 * size * 0.55, size * 1.33),
+    }
+}
+
+/// Width and height in pixels of one line of `text` as [`Canvas::text`]
+/// draws it at `size` pixels per em.
+#[cfg(windows)]
 pub fn text_size(text: &str, size: f32) -> (f32, f32) {
     let wide: Vec<u16> = text.encode_utf16().collect();
     let mut face = [0u16; 32];
@@ -177,6 +195,35 @@ impl Canvas<'_> {
 
     /// Draws one line of `text` with its top-left at `(x, y)`, `size` pixels
     /// per em.
+    #[cfg(target_os = "linux")]
+    pub fn text(&mut self, (x, y): (f32, f32), text: &str, size: f32, rgb: [u8; 3]) -> Result<()> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        let font = crate::sys::fonts::ui_semibold()
+            .ok_or_else(|| crate::PlatformError::Other("no sans-serif font found".into()))?;
+        let line = crate::sys::fonts::layout(&font, text, size.round().max(1.0));
+        let (ox, oy) = (x.round() as i32, y.round() as i32);
+        let (w, h) = (self.width as i32, self.height as i32);
+        // Coverage per pixel first, so overlapping glyph boxes (kerned
+        // pairs) do not blend twice.
+        let mut cover: std::collections::HashMap<(i32, i32), f32> = Default::default();
+        line.draw(|px, py, c| {
+            let e = cover.entry((ox + px, oy + py)).or_insert(0.0);
+            *e = (*e + c).min(1.0);
+        });
+        for ((px, py), c) in cover {
+            if px >= 0 && py >= 0 && px < w && py < h {
+                let i = (py * w + px) as usize;
+                self.pixels[i] = blend(self.pixels[i], rgb, c);
+            }
+        }
+        Ok(())
+    }
+
+    /// Draws one line of `text` with its top-left at `(x, y)`, `size` pixels
+    /// per em.
+    #[cfg(windows)]
     pub fn text(&mut self, (x, y): (f32, f32), text: &str, size: f32, rgb: [u8; 3]) -> Result<()> {
         let wide: Vec<u16> = text.encode_utf16().collect();
         if wide.is_empty() {

@@ -74,7 +74,7 @@ pub(crate) fn human_size(bytes: u64) -> String {
 }
 
 fn shelf_file() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("Nook").join("shelf.txt"))
+    shell::app_dir().map(|d| d.join("shelf.txt"))
 }
 
 /// Paths on the shelf from `text` (one per line), dropping blanks.

@@ -4,25 +4,40 @@
 //! Recording polls a ring of buffers instead of taking callbacks, so it
 //! needs no window and no callback thread; the caller runs it on a thread
 //! of its own and stops it with a flag.
+//!
+//! On Linux, recording reads raw PCM from PipeWire's `pw-record` (or
+//! PulseAudio's `parec`, which PipeWire also serves) and playback runs
+//! `pw-play` / `paplay`; both ship with Fedora Workstation.
 
-use crate::{PlatformError, Result, wide};
+#[cfg(target_os = "linux")]
+pub use linux::{play, record, stop_playback};
+
+#[cfg(windows)]
+use crate::wide;
+use crate::{PlatformError, Result};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
+#[cfg(windows)]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(windows)]
 use std::time::Duration;
+#[cfg(windows)]
 use windows::Win32::Media::Audio::{
     CALLBACK_NULL, HWAVEIN, PlaySoundW, SND_ASYNC, SND_FILENAME, SND_FLAGS, SND_NODEFAULT,
     WAVE_FORMAT_PCM, WAVE_MAPPER, WAVEFORMATEX, WAVEHDR, WHDR_DONE, waveInAddBuffer, waveInClose,
     waveInGetNumDevs, waveInOpen, waveInPrepareHeader, waveInReset, waveInStart,
     waveInUnprepareHeader,
 };
+#[cfg(windows)]
 use windows::core::{PCWSTR, PSTR};
 
 pub const SAMPLE_RATE: u32 = 44_100;
 /// Samples per buffer: 50 ms.
 const CHUNK: usize = SAMPLE_RATE as usize / 20;
+#[cfg(windows)]
 const BUFFERS: usize = 8;
 
+#[cfg(windows)]
 fn mm(call: &'static str, code: u32) -> Result<()> {
     if code == 0 {
         Ok(())
@@ -33,6 +48,7 @@ fn mm(call: &'static str, code: u32) -> Result<()> {
 
 /// Records from the default microphone until `stop` is set, handing each
 /// buffer of samples (about 50 ms) to `on_chunk` in order. Blocks.
+#[cfg(windows)]
 pub fn record(stop: &AtomicBool, mut on_chunk: impl FnMut(&[i16])) -> Result<()> {
     // SAFETY: the headers and their sample buffers live until after
     // `waveInUnprepareHeader`, neither moves while the device owns them,
@@ -187,6 +203,7 @@ pub fn read_wav(path: &Path) -> std::io::Result<(u32, Vec<i16>)> {
 }
 
 /// Starts playing a WAV file, replacing any sound playing.
+#[cfg(windows)]
 pub fn play(path: &Path) -> Result<()> {
     let w = wide(&path.to_string_lossy());
     // SAFETY: a null-terminated path; PlaySound copies what it needs.
@@ -208,9 +225,126 @@ pub fn play(path: &Path) -> Result<()> {
 }
 
 /// Stops what [`play`] started.
+#[cfg(windows)]
 pub fn stop_playback() {
     // SAFETY: a null sound stops the current one.
     let _ = unsafe { PlaySoundW(PCWSTR::null(), None, SND_FLAGS(0)) };
+}
+
+#[cfg(target_os = "linux")]
+mod linux {
+    use super::{CHUNK, SAMPLE_RATE};
+    use crate::sys::cmd;
+    use crate::{PlatformError, Result};
+    use std::io::Read;
+    use std::path::Path;
+    use std::process::{Child, Command, Stdio};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Records from the default microphone until `stop` is set, handing
+    /// each buffer of samples (about 50 ms) to `on_chunk` in order. Blocks.
+    pub fn record(stop: &AtomicBool, mut on_chunk: impl FnMut(&[i16])) -> Result<()> {
+        let rate = SAMPLE_RATE.to_string();
+        let mut child = if cmd::which("pw-record").is_some() {
+            Command::new("pw-record")
+                .args([
+                    "--format",
+                    "s16",
+                    "--rate",
+                    &rate,
+                    "--channels",
+                    "1",
+                    "--latency",
+                    "50ms",
+                    "-",
+                ])
+                .stdout(Stdio::piped())
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+        } else if cmd::which("parec").is_some() {
+            Command::new("parec")
+                .args([
+                    "--format=s16le",
+                    &format!("--rate={rate}"),
+                    "--channels=1",
+                    "--raw",
+                    "--latency-msec=50",
+                ])
+                .stdout(Stdio::piped())
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+        } else {
+            return Err(PlatformError::Other(
+                "no recorder found (install pipewire-utils or pulseaudio-utils)".into(),
+            ));
+        }
+        .map_err(|e| PlatformError::other("starting the recorder", e))?;
+        let mut out = child
+            .stdout
+            .take()
+            .ok_or_else(|| PlatformError::Other("recorder has no output".into()))?;
+        let mut bytes = vec![0u8; CHUNK * 2];
+        let mut samples = Vec::with_capacity(CHUNK);
+        let mut got_any = false;
+        let result = loop {
+            if stop.load(Ordering::Relaxed) {
+                break Ok(());
+            }
+            match out.read_exact(&mut bytes) {
+                Ok(()) => {
+                    got_any = true;
+                    samples.clear();
+                    samples.extend(
+                        bytes
+                            .chunks_exact(2)
+                            .map(|b| i16::from_le_bytes([b[0], b[1]])),
+                    );
+                    on_chunk(&samples);
+                }
+                Err(e) => {
+                    break if got_any {
+                        Ok(())
+                    } else {
+                        Err(PlatformError::other("no microphone input", e))
+                    };
+                }
+            }
+        };
+        let _ = child.kill();
+        let _ = child.wait();
+        result
+    }
+
+    static PLAYER: Mutex<Option<Child>> = Mutex::new(None);
+
+    /// Starts playing a WAV file, replacing any sound playing.
+    pub fn play(path: &Path) -> Result<()> {
+        stop_playback();
+        let program = ["pw-play", "paplay", "aplay"]
+            .into_iter()
+            .find(|p| cmd::which(p).is_some())
+            .ok_or_else(|| PlatformError::Other("no audio player found".into()))?;
+        let child = Command::new(program)
+            .arg(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| PlatformError::other(&format!("could not play {}", path.display()), e))?;
+        *PLAYER.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
+        Ok(())
+    }
+
+    /// Stops what [`play`] started.
+    pub fn stop_playback() {
+        if let Some(mut child) = PLAYER.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
 
 #[cfg(test)]

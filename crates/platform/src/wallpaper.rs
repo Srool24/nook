@@ -1,22 +1,51 @@
 //! The desktop wallpaper: its dominant accent color, setting a new one, and
 //! the folder picker the wallpaper browser uses.
 
-use crate::{PlatformError, Result, Win32Context, system};
+#[cfg(windows)]
+use crate::Win32Context;
+use crate::{PlatformError, Result, system};
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
 use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
 };
+#[cfg(windows)]
 use windows::Win32::UI::Shell::{
     DesktopWallpaper, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, FileOpenDialog, IDesktopWallpaper,
     IFileOpenDialog, IShellItem, SHCreateItemFromParsingName, SIGDN_FILESYSPATH,
 };
+#[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
     SPI_SETDESKWALLPAPER, SPIF_SENDCHANGE, SPIF_UPDATEINIFILE, SystemParametersInfoW,
 };
+#[cfg(windows)]
 use windows::core::{HSTRING, PCWSTR};
+
+/// Sets `path` as the wallpaper on every monitor, for both the light and
+/// the dark style (GNOME keeps one of each).
+#[cfg(target_os = "linux")]
+pub fn set_desktop(path: &Path) -> Result<()> {
+    use crate::sys::settings;
+    let abs = std::fs::canonicalize(path)
+        .map_err(|e| PlatformError::Other(format!("{}: {e}", path.display())))?;
+    let uri = settings::quote(&crate::sys::dbus::path_to_uri(&abs));
+    const BACKGROUND: &str = "org.gnome.desktop.background";
+    settings::set(BACKGROUND, "picture-uri", &uri)?;
+    settings::set(BACKGROUND, "picture-uri-dark", &uri)
+}
+
+/// Shows the desktop's folder chooser (the file chooser portal), starting
+/// in `start`. Returns `None` if it was cancelled. Blocks until the user
+/// answers; call it on its own thread.
+#[cfg(target_os = "linux")]
+pub fn pick_folder(title: &str, start: Option<&Path>) -> Result<Option<PathBuf>> {
+    let paths = crate::files::choose(title, true, false, start)?;
+    Ok(paths.into_iter().next())
+}
 
 /// Sets `path` as the wallpaper on every monitor. Blocks while Windows
 /// applies it (it fades it in), so call it off the UI thread.
+#[cfg(windows)]
 pub fn set_desktop(path: &Path) -> Result<()> {
     let wide = HSTRING::from(path.as_os_str());
     // SAFETY: per-thread COM init (harmless if repeated); the path outlives
@@ -44,6 +73,7 @@ pub fn set_desktop(path: &Path) -> Result<()> {
 
 /// Shows the system folder picker, starting in `start`. Returns `None` if
 /// it was cancelled. Modal; call it on its own thread.
+#[cfg(windows)]
 pub fn pick_folder(title: &str, start: Option<&Path>) -> Result<Option<PathBuf>> {
     // SAFETY: COM calls on a dialog we own; the returned path string is
     // freed with CoTaskMemFree after copying.
@@ -82,8 +112,12 @@ pub fn accent_from_wallpaper() -> Result<Option<[u8; 3]>> {
     let Some(path) = system::wallpaper_path() else {
         return Ok(None);
     };
+    #[cfg(windows)]
     let img = image::open(&path)
         .map_err(|e| PlatformError::Other(format!("decode {}: {e}", path.display())))?;
+    #[cfg(target_os = "linux")]
+    let img = crate::sys::pixbuf::open_any(&path, 256)
+        .ok_or_else(|| PlatformError::Other(format!("cannot decode {}", path.display())))?;
     let thumb = img.thumbnail(64, 64).to_rgb8();
     let pixels: Vec<[u8; 3]> = thumb.pixels().map(|p| p.0).collect();
     Ok(dominant_accent(&pixels))

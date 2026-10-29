@@ -14,6 +14,11 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow, SW_SHOWNORMAL};
 use windows::core::PCWSTR;
 
+/// Nook's own folder for settings and data: `%APPDATA%\Nook`.
+pub fn app_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("APPDATA").map(|a| std::path::PathBuf::from(a).join("Nook"))
+}
+
 /// The user's Screenshots folder (Pictures\Screenshots unless moved).
 pub fn screenshots_dir() -> Option<std::path::PathBuf> {
     // SAFETY: the returned string is freed with CoTaskMemFree after copying.

@@ -5,21 +5,35 @@
 //! accelerated windows included. Nook's own windows are left out of the
 //! grab: they are marked `WDA_EXCLUDEFROMCAPTURE` for the moment of the
 //! copy, so the open panel never shows up in what you select.
+//!
+//! On a GNOME Wayland session only the compositor can see the whole
+//! screen, so the grab goes through the desktop portal's `Screenshot`
+//! (GNOME asks once whether Nook may take screenshots); Nook's windows are
+//! faded out for that moment. In an X11 session the root window is read
+//! directly.
 
+#[cfg(windows)]
+use crate::Win32Context;
 use crate::monitor::Rect;
-use crate::{PlatformError, Result, Win32Context};
+use crate::{PlatformError, Result};
+#[cfg(windows)]
 use windows::Win32::Foundation::{HWND, LPARAM};
+#[cfg(windows)]
 use windows::Win32::Graphics::Dwm::DwmFlush;
+#[cfg(windows)]
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleBitmap,
     CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, ReleaseDC,
     SRCCOPY, SelectObject,
 };
+#[cfg(windows)]
 use windows::Win32::System::Threading::GetCurrentProcessId;
+#[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindowDisplayAffinity, GetWindowThreadProcessId, IsWindowVisible,
     SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WINDOW_DISPLAY_AFFINITY,
 };
+#[cfg(windows)]
 use windows::core::BOOL;
 
 /// A captured image: opaque BGRA pixels (`0xFFRRGGBB`), top-down.
@@ -121,6 +135,15 @@ pub fn crop_pixels(pixels: &[u32], width: u32, origin: (i32, i32), r: Rect) -> O
 }
 
 /// Copies `r` from the screen, leaving Nook's own windows out.
+#[cfg(target_os = "linux")]
+pub fn grab(r: Rect) -> Result<Frame> {
+    linux::grab_desktop()?
+        .crop(r)
+        .ok_or_else(|| PlatformError::Other("capture rectangle is off screen".into()))
+}
+
+/// Copies `r` from the screen, leaving Nook's own windows out.
+#[cfg(windows)]
 pub fn grab(r: Rect) -> Result<Frame> {
     let hidden = hide_own_windows();
     let frame = blit(r);
@@ -131,6 +154,7 @@ pub fn grab(r: Rect) -> Result<Frame> {
     frame
 }
 
+#[cfg(windows)]
 fn blit(r: Rect) -> Result<Frame> {
     let (w, h) = (r.width(), r.height());
     if w <= 0 || h <= 0 {
@@ -198,6 +222,7 @@ fn blit(r: Rect) -> Result<Frame> {
 /// Marks every visible top-level window of this process as excluded from
 /// capture and waits for DWM to compose a frame without them. Returns the
 /// previous affinities to restore.
+#[cfg(windows)]
 fn hide_own_windows() -> Vec<(HWND, WINDOW_DISPLAY_AFFINITY)> {
     unsafe extern "system" fn collect(hwnd: HWND, lparam: LPARAM) -> BOOL {
         // SAFETY: `lparam` is the `Vec` passed to `EnumWindows` below, alive
@@ -237,6 +262,158 @@ fn hide_own_windows() -> Vec<(HWND, WINDOW_DISPLAY_AFFINITY)> {
         }
     }
     changed
+}
+
+#[cfg(target_os = "linux")]
+mod linux {
+    use super::Frame;
+    use crate::sys::dbus;
+    use crate::sys::x11::{Ctx, X, x};
+    use crate::{PlatformError, Result};
+    use std::collections::HashMap;
+    use std::time::Duration;
+    use x11rb::connection::Connection as _;
+    use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _, ImageFormat};
+    use zbus::zvariant::Value;
+
+    /// The whole X screen (every monitor), in X screen pixels.
+    pub fn grab_desktop() -> Result<Frame> {
+        let x = x()?;
+        let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some()
+            || std::env::var("XDG_SESSION_TYPE").is_ok_and(|t| t == "wayland");
+        if !wayland {
+            return root_image(x);
+        }
+        let hidden = hide_own_windows(x);
+        let shot = portal_screenshot();
+        restore(x, hidden);
+        let img = shot?;
+        let setup = &x.conn.setup().roots[x.screen];
+        let (w, h) = (
+            u32::from(setup.width_in_pixels),
+            u32::from(setup.height_in_pixels),
+        );
+        // The portal hands out device pixels; Nook works in X screen pixels,
+        // which are logical ones under a scaled GNOME session.
+        let img = if img.dimensions() != (w, h) {
+            image::imageops::resize(&img, w, h, image::imageops::FilterType::Triangle)
+        } else {
+            img
+        };
+        let pixels = img
+            .pixels()
+            .map(|p| {
+                let [r, g, b] = p.0;
+                0xFF00_0000 | (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)
+            })
+            .collect();
+        Ok(Frame {
+            origin: (0, 0),
+            width: w,
+            height: h,
+            pixels,
+        })
+    }
+
+    /// A non-interactive screenshot through the desktop portal, read and
+    /// deleted again (it only exists for this grab).
+    fn portal_screenshot() -> Result<image::RgbImage> {
+        let response = dbus::portal(
+            "org.freedesktop.portal.Screenshot",
+            "Screenshot",
+            Some(Duration::from_secs(20)),
+            |token| {
+                let mut options: HashMap<&str, Value<'_>> = HashMap::new();
+                options.insert("handle_token", Value::from(token.to_owned()));
+                options.insert("interactive", Value::from(false));
+                options.insert("modal", Value::from(false));
+                ("", options)
+            },
+        )?;
+        let dbus::Response::Ok(results) = response else {
+            return Err(PlatformError::Other("screenshot was refused".into()));
+        };
+        let uri = results
+            .get("uri")
+            .and_then(|v| dbus::as_str(v))
+            .ok_or_else(|| PlatformError::Other("screenshot portal returned no file".into()))?;
+        let path = dbus::uri_to_path(&uri)
+            .ok_or_else(|| PlatformError::Other(format!("unexpected screenshot uri {uri}")))?;
+        let img = image::open(&path)
+            .map_err(|e| PlatformError::other("reading the screenshot", e))?
+            .to_rgb8();
+        let _ = std::fs::remove_file(&path);
+        Ok(img)
+    }
+
+    /// Reads the root window (an X11 session shows everything there).
+    fn root_image(x: &X) -> Result<Frame> {
+        let setup = &x.conn.setup().roots[x.screen];
+        let (w, h) = (setup.width_in_pixels, setup.height_in_pixels);
+        let mut pixels = Vec::with_capacity(usize::from(w) * usize::from(h));
+        let strip: u16 = 128;
+        let mut y = 0u16;
+        while y < h {
+            let rows = strip.min(h - y);
+            let reply = x
+                .conn
+                .get_image(ImageFormat::Z_PIXMAP, x.root, 0, y as i16, w, rows, !0)
+                .ctx("GetImage")?
+                .reply()
+                .ctx("GetImage")?;
+            let data = reply.data;
+            let stride = data.len() / usize::from(rows).max(1);
+            for row in 0..usize::from(rows) {
+                let line = &data[row * stride..row * stride + usize::from(w) * 4];
+                pixels.extend(
+                    line.chunks_exact(4)
+                        .map(|c| 0xFF00_0000 | u32::from_le_bytes([c[0], c[1], c[2], 0])),
+                );
+            }
+            y += rows;
+        }
+        Ok(Frame {
+            origin: (0, 0),
+            width: u32::from(w),
+            height: u32::from(h),
+            pixels,
+        })
+    }
+
+    /// Nook's visible windows and their opacity before they were faded out.
+    type Hidden = Vec<(u32, Option<u32>)>;
+
+    /// Fades Nook's own windows out and waits for the compositor to draw a
+    /// frame without them.
+    fn hide_own_windows(x: &X) -> Hidden {
+        let pid = std::process::id();
+        let prop = x.atoms._NET_WM_WINDOW_OPACITY;
+        let mut hidden = Vec::new();
+        for w in x.clients() {
+            if x.pid_of(w) != Some(pid) || !x.is_viewable(w) {
+                continue;
+            }
+            let before = x.prop32(w, prop).first().copied();
+            x.set_prop32(w, prop, AtomEnum::CARDINAL, &[0]);
+            hidden.push((w, before));
+        }
+        x.flush();
+        if !hidden.is_empty() {
+            std::thread::sleep(Duration::from_millis(90));
+        }
+        hidden
+    }
+
+    fn restore(x: &X, hidden: Hidden) {
+        let prop = x.atoms._NET_WM_WINDOW_OPACITY;
+        for (w, before) in hidden {
+            match before {
+                Some(v) => x.set_prop32(w, prop, AtomEnum::CARDINAL, &[v]),
+                None => x.delete_prop(w, prop),
+            }
+        }
+        x.flush();
+    }
 }
 
 #[cfg(test)]

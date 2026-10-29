@@ -49,6 +49,28 @@ struct Hotkeys {
     /// Module hotkeys and the module each belongs to.
     modules: Vec<(HotKey, &'static str)>,
     rx: Receiver<GlobalHotKeyEvent>,
+    /// GNOME custom shortcuts stand in for key grabs (Linux, Wayland).
+    #[cfg(target_os = "linux")]
+    desktop: Option<DesktopShortcuts>,
+}
+
+/// Shortcuts registered with GNOME, and the ids they send back.
+#[cfg(target_os = "linux")]
+struct DesktopShortcuts {
+    wanted: Vec<crate::shortcuts::Shortcut>,
+    rx: Option<Receiver<String>>,
+}
+
+#[cfg(target_os = "linux")]
+impl DesktopShortcuts {
+    fn set(&mut self, id: &str, name: &str, accel: &str) {
+        self.wanted.retain(|s| s.id != id);
+        self.wanted.push(crate::shortcuts::Shortcut {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            accel: accel.to_owned(),
+        });
+    }
 }
 
 impl Hotkeys {
@@ -57,6 +79,15 @@ impl Hotkeys {
         let Some(accel) = m.default_hotkey() else {
             return;
         };
+        #[cfg(target_os = "linux")]
+        if let Some(d) = &mut self.desktop {
+            d.set(m.id(), m.name(), accel);
+            if let Ok(hk) = HotKey::from_str(accel) {
+                self.modules.push((hk, m.id()));
+            }
+            crate::shortcuts::sync(d.wanted.clone());
+            return;
+        }
         match HotKey::from_str(accel).map(|hk| (self.manager.register(hk), hk)) {
             Ok((Ok(()), hk)) => self.modules.push((hk, m.id())),
             Ok((Err(e), _)) => tracing::warn!("hotkey {accel} for {} unavailable: {e}", m.id()),
@@ -66,6 +97,13 @@ impl Hotkeys {
 
     /// Frees the shortcut of a module that was taken out (a plugin).
     fn remove_module(&mut self, id: &str) {
+        #[cfg(target_os = "linux")]
+        if let Some(d) = &mut self.desktop {
+            d.wanted.retain(|s| s.id != id);
+            self.modules.retain(|(_, m)| *m != id);
+            crate::shortcuts::sync(d.wanted.clone());
+            return;
+        }
         for (hk, _) in self.modules.iter().filter(|(_, m)| *m == id) {
             if let Err(e) = self.manager.unregister(*hk) {
                 tracing::warn!("releasing hotkey for {id}: {e}");
@@ -123,6 +161,10 @@ pub struct NookApp {
     /// The anonymous daily usage ping.
     stats: Stats,
     _instance: InstanceGuard,
+    /// `--hotkey=<id>` this launch was started with (a GNOME shortcut while
+    /// Nook was not running).
+    #[cfg(target_os = "linux")]
+    pending_hotkey: Option<String>,
     #[cfg(feature = "debug-overlay")]
     overlay: crate::overlay::DebugOverlay,
 }
@@ -138,6 +180,8 @@ impl NookApp {
 
         let hwnd = match cc.window_handle().context("window handle")?.as_raw() {
             RawWindowHandle::Win32(h) => Hwnd::from_raw(h.hwnd.get()),
+            RawWindowHandle::Xlib(h) => Hwnd::from_raw(h.window as isize),
+            RawWindowHandle::Xcb(h) => Hwnd::from_raw(h.window.get() as isize),
             other => anyhow::bail!("unexpected window handle {other:?}"),
         };
         window::ensure_overlay(hwnd, false).context("overlay window styles")?;
@@ -273,6 +317,8 @@ impl NookApp {
             updater,
             stats,
             _instance: instance,
+            #[cfg(target_os = "linux")]
+            pending_hotkey: crate::shortcuts::requested(),
             #[cfg(feature = "debug-overlay")]
             overlay: Default::default(),
         })
@@ -859,6 +905,35 @@ fn timings(cfg: &Config) -> ShellTimings {
 
 fn register_hotkeys(cfg: &Config, registry: &Registry, ctx: &egui::Context) -> Result<Hotkeys> {
     let manager = GlobalHotKeyManager::new().context("creating hotkey manager")?;
+    #[cfg(target_os = "linux")]
+    if crate::shortcuts::use_desktop() {
+        let mut desktop = DesktopShortcuts {
+            wanted: Vec::new(),
+            rx: crate::shortcuts::serve(ctx),
+        };
+        desktop.set(
+            crate::shortcuts::TOGGLE,
+            "Open the panel",
+            &cfg.toggle_hotkey,
+        );
+        let (_tx, rx) = unbounded();
+        let mut hotkeys = Hotkeys {
+            manager,
+            toggle_id: None,
+            modules: Vec::new(),
+            rx,
+            desktop: Some(desktop),
+        };
+        for m in registry.all() {
+            if let (Some(accel), Some(d)) = (m.default_hotkey(), &mut hotkeys.desktop) {
+                d.set(m.id(), m.name(), accel);
+            }
+        }
+        if let Some(d) = &hotkeys.desktop {
+            crate::shortcuts::sync(d.wanted.clone());
+        }
+        return Ok(hotkeys);
+    }
     let toggle_id = match HotKey::from_str(&cfg.toggle_hotkey) {
         Ok(hk) => match manager.register(hk) {
             Ok(()) => Some(hk.id()),
@@ -884,6 +959,8 @@ fn register_hotkeys(cfg: &Config, registry: &Registry, ctx: &egui::Context) -> R
         toggle_id,
         modules: Vec::new(),
         rx,
+        #[cfg(target_os = "linux")]
+        desktop: None,
     };
     for m in registry.all() {
         hotkeys.add_module(m);
@@ -933,6 +1010,23 @@ impl eframe::App for NookApp {
                 {
                     self.stats.tool(id);
                     m.on_hotkey();
+                }
+            }
+            // GNOME shortcuts arrive by id (and the one Nook was started
+            // with, if any).
+            #[cfg(target_os = "linux")]
+            {
+                let mut ids: Vec<String> = self.pending_hotkey.take().into_iter().collect();
+                if let Some(rx) = hk.desktop.as_ref().and_then(|d| d.rx.as_ref()) {
+                    ids.extend(rx.try_iter());
+                }
+                for id in ids {
+                    if id == crate::shortcuts::TOGGLE {
+                        toggle = !toggle;
+                    } else if let Some(m) = self.registry.get_mut(&id) {
+                        self.stats.tool(m.id());
+                        m.on_hotkey();
+                    }
                 }
             }
             if toggle {

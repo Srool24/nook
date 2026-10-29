@@ -1,6 +1,7 @@
 # Nook
 
-A floating notch for Windows 10/11. A small glass pill sits at the top
+A floating notch for Windows 10/11 and Linux (Fedora GNOME, see
+[docs/LINUX.md](docs/LINUX.md)). A small glass pill sits at the top
 of the screen (center, or either corner). Hover it and it springs open into a bento grid of
 utilities. Move away and it folds back. It idles at 0% CPU.
 
@@ -21,6 +22,14 @@ Get `Nook-Setup-<version>.exe` from
 it. Windows 10 or 11, 64-bit; no admin rights needed. The installer isn't
 code-signed yet, so SmartScreen may say "Windows protected your PC": click
 **More info**, then **Run anyway**.
+
+## Linux
+
+Fedora Workstation (GNOME on Wayland) runs every tool. Build an RPM with
+`packaging/linux/build-rpm.sh`, or install for your user with
+`packaging/linux/install.sh --deps && packaging/linux/install.sh`. How each
+Windows API maps to Linux, the GNOME shortcuts and the known differences
+are in [docs/LINUX.md](docs/LINUX.md).
 
 ## Build and run
 

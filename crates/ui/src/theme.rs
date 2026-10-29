@@ -283,21 +283,18 @@ pub fn to_hex(c: Color32) -> String {
 
 /// Installs the text and icon fonts.
 ///
-/// Text uses the system's Segoe UI (regular + semibold), whose digits are
-/// tabular by default; egui cannot switch OpenType features such as `tnum`,
-/// which rules out Inter's proportional default figures. If the files are
-/// missing, egui's bundled font is used. See docs/NOTES.md.
+/// Text uses the system's Segoe UI (regular + semibold) on Windows, whose
+/// digits are tabular by default; egui cannot switch OpenType features such
+/// as `tnum`, which rules out Inter's proportional default figures. On Linux
+/// the same rule picks Noto Sans (tabular by default, installed on Fedora),
+/// then DejaVu Sans, then whatever fontconfig calls `sans-serif`; GNOME's
+/// own Adwaita Sans is Inter-based and would make timer digits jitter. If
+/// nothing is found, egui's bundled font is used. See docs/NOTES.md.
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
-    let windir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
-    let load = |file: &str| std::fs::read(format!("{windir}\\Fonts\\{file}")).ok();
-
-    let regular = load("segoeui.ttf");
-    let semibold = load("seguisb.ttf");
-    if let Some(bytes) = regular {
-        fonts
-            .font_data
-            .insert("segoe".into(), FontData::from_owned(bytes).into());
+    let (regular, semibold) = system_text_fonts();
+    if let Some(data) = regular {
+        fonts.font_data.insert("segoe".into(), data.into());
         if let Some(list) = fonts.families.get_mut(&FontFamily::Proportional) {
             list.insert(0, "segoe".into());
         }
@@ -307,10 +304,8 @@ pub fn install_fonts(ctx: &egui::Context) {
         .get(&FontFamily::Proportional)
         .cloned()
         .unwrap_or_default();
-    if let Some(bytes) = semibold {
-        fonts
-            .font_data
-            .insert("segoe-semibold".into(), FontData::from_owned(bytes).into());
+    if let Some(data) = semibold {
+        fonts.font_data.insert("segoe-semibold".into(), data.into());
         semibold_family.insert(0, "segoe-semibold".into());
     }
     fonts
@@ -324,6 +319,64 @@ pub fn install_fonts(ctx: &egui::Context) {
         egui_phosphor::Variant::Fill.font_bytes(),
     );
     ctx.set_fonts(fonts);
+}
+
+/// Regular and semibold text faces from the system, if found.
+#[cfg(windows)]
+fn system_text_fonts() -> (Option<FontData>, Option<FontData>) {
+    let windir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let load = |file: &str| {
+        std::fs::read(format!("{windir}\\Fonts\\{file}"))
+            .ok()
+            .map(FontData::from_owned)
+    };
+    (load("segoeui.ttf"), load("seguisb.ttf"))
+}
+
+/// Regular and semibold text faces from fontconfig, if found. A variable
+/// font (Fedora ships Noto Sans as one) is used for both, at the `wght`
+/// axis values 400 and 600.
+#[cfg(not(windows))]
+fn system_text_fonts() -> (Option<FontData>, Option<FontData>) {
+    for family in ["Noto Sans", "DejaVu Sans", "sans-serif"] {
+        let regular = fc_match(family, "regular", 400.0);
+        if regular.is_some() {
+            return (regular, fc_match(family, "semibold", 600.0));
+        }
+    }
+    (None, None)
+}
+
+#[cfg(not(windows))]
+fn fc_match(family: &str, weight: &str, wght: f32) -> Option<FontData> {
+    let out = std::process::Command::new("fc-match")
+        .args([
+            "-f",
+            "%{family[0]}\n%{file}\n%{index}\n%{variable}",
+            &format!("{family}:weight={weight}"),
+        ])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut lines = text.lines();
+    let found = lines.next()?.trim();
+    let file = lines.next()?.trim();
+    let index: u32 = lines
+        .next()
+        .and_then(|i| i.trim().parse().ok())
+        .unwrap_or(0);
+    let variable = lines.next().is_some_and(|v| v.trim() == "True");
+    // fontconfig always answers; only take a substitute for the generic name.
+    if family != "sans-serif" && !found.eq_ignore_ascii_case(family) {
+        return None;
+    }
+    let bytes = std::fs::read(file).ok()?;
+    let mut data = FontData::from_owned(bytes);
+    data.index = index;
+    if variable {
+        data.tweak.coords = egui::epaint::text::VariationCoords::new([(b"wght", wght)]);
+    }
+    Some(data)
 }
 
 #[cfg(test)]

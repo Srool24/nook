@@ -83,6 +83,28 @@ fn group(
     apps.into_values().collect()
 }
 
+/// The system's own process viewer.
+fn open_task_manager() {
+    #[cfg(windows)]
+    let _ = shell::open("taskmgr.exe");
+    #[cfg(not(windows))]
+    {
+        let entry = [
+            "org.gnome.SystemMonitor.desktop",
+            "gnome-system-monitor.desktop",
+        ]
+        .iter()
+        .find_map(|id| shell::find_app(id));
+        let res = match entry {
+            Some(p) => shell::open(&p.display().to_string()),
+            None => shell::open("gnome-system-monitor"),
+        };
+        if let Err(e) = res {
+            tracing::warn!("opening the system monitor: {e}");
+        }
+    }
+}
+
 fn uptime_label(d: Duration) -> String {
     let m = d.as_secs() / 60;
     let (days, hours, mins) = (m / 1440, (m / 60) % 24, m % 60);
@@ -690,10 +712,14 @@ impl Module for SystemMonitor {
             self.sample();
         }
         if widgets::icon_button(header, icons::ARROW_SQUARE_OUT, 26.0, false, theme)
-            .on_hover_text("Open Task Manager")
+            .on_hover_text(if cfg!(windows) {
+                "Open Task Manager"
+            } else {
+                "Open System Monitor"
+            })
             .clicked()
         {
-            let _ = shell::open("taskmgr.exe");
+            open_task_manager();
         }
         let left = Rect::from_min_size(body.min, vec2(450.0, body.height()));
         self.cards(ui, left, theme);

@@ -12,7 +12,8 @@
 //! - Back, home, recents, volume and power keys; USB or Wi-Fi (adb connect,
 //!   Android 11+ pairing, or switching a USB phone to Wi-Fi in one click).
 //!
-//! Settings live in `%APPDATA%\Nook\phone.txt`.
+//! Settings live in `%APPDATA%\Nook\phone.txt` (`~/.config/nook/phone.txt`
+//! on Linux).
 
 mod adb;
 mod localsend;
@@ -33,6 +34,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
+
+/// How to let phones reach the LocalSend server.
+const FIREWALL_HINT: &str = if cfg!(windows) {
+    "Allow Nook through the Windows firewall if asked."
+} else {
+    "Fedora Workstation's firewall lets it through; elsewhere open the port."
+};
 
 /// The page is taller than the regular panel: room for a phone screen.
 const PAGE: egui::Vec2 = vec2(800.0, 560.0);
@@ -70,7 +78,7 @@ struct Settings {
 
 impl Settings {
     fn file() -> Option<PathBuf> {
-        std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("Nook").join("phone.txt"))
+        shell::app_dir().map(|d| d.join("phone.txt"))
     }
 
     fn load() -> Self {
@@ -822,7 +830,7 @@ impl PhoneLink {
             {
                 match mirror::install_with_winget() {
                     Ok(()) => self.say("Installing… press Check again when it is done"),
-                    Err(e) => self.say(format!("Could not run winget: {e}")),
+                    Err(e) => self.say(format!("Could not run {}: {e}", mirror::INSTALLER)),
                 }
             }
             let b2 = Rect::from_center_size(pos2(c.x, c.y + 98.0), vec2(150.0, 28.0));
@@ -976,7 +984,7 @@ impl PhoneLink {
         {
             match mirror::install_with_winget() {
                 Ok(()) => self.say("Installing… press Check again in Setup when it is done"),
-                Err(e) => self.say(format!("Could not run winget: {e}")),
+                Err(e) => self.say(format!("Could not run {}: {e}", mirror::INSTALLER)),
             }
         }
         if let Some(err) = &self.mirror_error {
@@ -1617,7 +1625,7 @@ impl PhoneLink {
                 heading(ui, "RECEIVING FILES");
                 match &self.ls {
                     Some(ls) => match &ls.server_error {
-                        None => dim(ui, &format!("Visible as \"{}\" on port {}. Allow Nook through the Windows firewall if asked.", ls.alias(), ls.port())),
+                        None => dim(ui, &format!("Visible as \"{}\" on port {}. {}", ls.alias(), ls.port(), FIREWALL_HINT)),
                         Some(e) => dim(ui, &format!("Receiving is off: {e}")),
                     },
                     None => dim(ui, "Starting…"),
@@ -1653,10 +1661,10 @@ impl PhoneLink {
                     None => {
                         dim(ui, "scrcpy is not installed. It is free and open source, and brings adb along.");
                         ui.horizontal(|ui| {
-                            if ui.button("Install with WinGet").clicked() {
+                            if ui.button(if cfg!(windows) { "Install with WinGet" } else { "Install with dnf" }).clicked() {
                                 match mirror::install_with_winget() {
                                     Ok(()) => self.say("Installing… press Check again when it is done"),
-                                    Err(e) => self.say(format!("Could not run winget: {e}")),
+                                    Err(e) => self.say(format!("Could not run {}: {e}", mirror::INSTALLER)),
                                 }
                             }
                             if ui.button("Check again").clicked() {

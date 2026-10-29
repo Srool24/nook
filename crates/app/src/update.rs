@@ -6,6 +6,11 @@
 //! `Nook-Setup-*.exe`, checks its size and SHA-256, runs it silently and
 //! quits. The installer replaces the files and starts Nook again (see the
 //! `relaunch` parameter in `installer\nook.iss`).
+//!
+//! On Linux the release's `.rpm` for this architecture is installed with
+//! `pkexec dnf install` (GNOME asks for the password), then Nook restarts.
+//! Builds can point the check at another repository (a fork that publishes
+//! Linux packages) with `NOOK_RELEASES_REPO=owner/name` at compile time.
 
 use anyhow::{Context, Result, bail};
 use crossbeam_channel::{Receiver, Sender, unbounded};
@@ -16,8 +21,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-const LATEST_URL: &str = "https://api.github.com/repos/Geguchh024/nook/releases/latest";
-pub const RELEASES_PAGE: &str = "https://github.com/Geguchh024/nook/releases/latest";
+// `NOOK_REPO` is set by build.rs (`owner/name`).
+const LATEST_URL: &str = concat!(
+    "https://api.github.com/repos/",
+    env!("NOOK_REPO"),
+    "/releases/latest"
+);
+pub const RELEASES_PAGE: &str =
+    concat!("https://github.com/", env!("NOOK_REPO"), "/releases/latest");
 const FIRST_CHECK: Duration = Duration::from_secs(20);
 const CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
@@ -250,10 +261,7 @@ fn pick(api: ApiRelease, current: &str) -> Option<Release> {
     if !is_newer(&version, current) {
         return None;
     }
-    let asset = api.assets.into_iter().find(|a| {
-        let n = a.name.to_ascii_lowercase();
-        n.starts_with("nook-setup") && n.ends_with(".exe")
-    })?;
+    let asset = api.assets.into_iter().find(|a| is_installer(&a.name))?;
     let sha256 = asset
         .digest
         .as_deref()
@@ -359,8 +367,55 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// The release asset that installs this build: `Nook-Setup-*.exe` on
+/// Windows, `nook-*.<arch>.rpm` on Linux.
+fn is_installer(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    if cfg!(windows) {
+        n.starts_with("nook-setup") && n.ends_with(".exe")
+    } else {
+        n.starts_with("nook") && n.ends_with(&format!(".{}.rpm", std::env::consts::ARCH))
+    }
+}
+
+/// Where the package manager installed Nook, or `None` for a build run
+/// from elsewhere (cargo, a copy in `~/.local/bin`), which updates through
+/// the release page instead.
+#[cfg(not(windows))]
+pub fn installed_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?.to_path_buf();
+    (exe.starts_with("/usr/") && Path::new("/usr/bin/rpm").exists()).then_some(dir)
+}
+
+/// Installs the downloaded package (pkexec asks for the password; dnf
+/// verifies it), then has a new Nook start once this one has quit.
+#[cfg(not(windows))]
+fn launch(installer: &Path) -> Result<()> {
+    let status = std::process::Command::new("pkexec")
+        .args(["dnf", "install", "-y"])
+        .arg(installer)
+        .stdin(std::process::Stdio::null())
+        .status()
+        .context("starting pkexec")?;
+    if !status.success() {
+        bail!("the package was not installed ({status})");
+    }
+    let exe = std::env::current_exe().context("current_exe")?;
+    std::process::Command::new("sh")
+        .args(["-c", "sleep 1; exec \"$0\""])
+        .arg(&exe)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .context("scheduling the restart")?;
+    Ok(())
+}
+
 /// Folder Nook was installed to by Setup (it holds the uninstaller), or
 /// `None` for a dev build or a loose exe.
+#[cfg(windows)]
 pub fn installed_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?.to_path_buf();
@@ -370,6 +425,7 @@ pub fn installed_dir() -> Option<PathBuf> {
 /// Runs the installer silently. Setup stops Nook, replaces the files and,
 /// with `/RELAUNCH=1`, starts it again. An install for all users (under
 /// Program Files) needs `/ALLUSERS`, which brings up the UAC prompt.
+#[cfg(windows)]
 fn launch(installer: &Path) -> Result<()> {
     let dir = installed_dir().context("Nook was not installed by Setup")?;
     let all_users = std::env::var_os("ProgramFiles")
@@ -501,17 +557,32 @@ mod tests {
 
     #[test]
     fn picks_the_installer_of_a_newer_release() {
+        let installer = |v: &str| {
+            if cfg!(windows) {
+                format!("Nook-Setup-{v}.exe")
+            } else {
+                format!("nook-{v}-1.fc43.{}.rpm", std::env::consts::ARCH)
+            }
+        };
         let r = pick(
-            api("v0.2.0", &["notes.txt", "Nook-Setup-0.2.0.exe"]),
+            api(
+                "v0.2.0",
+                &[
+                    "notes.txt",
+                    "Nook-Setup-0.2.0.exe",
+                    "nook-0.2.0-1.fc43.src.rpm",
+                    &installer("0.2.0"),
+                ],
+            ),
             "0.1.0",
         )
         .expect("newer release");
         assert_eq!(r.version, "0.2.0");
-        assert_eq!(r.asset_name, "Nook-Setup-0.2.0.exe");
+        assert_eq!(r.asset_name, installer("0.2.0"));
         assert_eq!(r.sha256.as_deref(), Some("abcd"));
-        assert!(pick(api("v0.1.0", &["Nook-Setup-0.1.0.exe"]), "0.1.0").is_none());
+        assert!(pick(api("v0.1.0", &[&installer("0.1.0")]), "0.1.0").is_none());
         assert!(pick(api("v0.2.0", &["nook.zip"]), "0.1.0").is_none());
-        let mut pre = api("v0.3.0", &["Nook-Setup-0.3.0.exe"]);
+        let mut pre = api("v0.3.0", &[&installer("0.3.0")]);
         pre.prerelease = true;
         assert!(pick(pre, "0.1.0").is_none());
     }

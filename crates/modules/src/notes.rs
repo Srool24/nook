@@ -84,7 +84,7 @@ fn ago(when: SystemTime, now: SystemTime) -> String {
 }
 
 fn notes_dir() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("Nook").join("notes"))
+    shell::app_dir().map(|d| d.join("notes"))
 }
 
 fn load(dir: &Path) -> Vec<Note> {

@@ -16,16 +16,33 @@
 //!
 //! A window region would do this with no thread, but changing the region of
 //! the OpenGL window flashes the newly included area (see `window`).
+//!
+//! On Linux the X server does the routing: the shape becomes the window's
+//! SHAPE input region ([`window::set_input_shape`]), pointer events outside
+//! it go to the window below, and no thread is needed.
+//!
+//! [`window::set_input_shape`]: crate::window
 
+#[cfg(target_os = "linux")]
+pub use linux::HitTester;
+
+#[cfg(windows)]
 use crate::{PlatformError, Result};
+#[cfg(windows)]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(windows)]
 use std::sync::{Arc, Mutex};
+#[cfg(windows)]
 use std::thread::JoinHandle;
+#[cfg(windows)]
 use std::time::Duration;
+#[cfg(windows)]
 use windows::Win32::Foundation::POINT;
+#[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON,
 };
+#[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
 /// Interactive area in screen pixels: closed polygons.
@@ -40,6 +57,7 @@ impl HitShape {
     }
 
     /// Whether `p` is within `margin` px of the shape's bounding box.
+    #[cfg_attr(not(windows), allow(dead_code))]
     fn near(&self, (x, y): (f32, f32), margin: f32) -> bool {
         type Bounds = Option<(f32, f32, f32, f32)>;
         self.polygons
@@ -76,28 +94,33 @@ pub fn polygon_contains(poly: &[(f32, f32)], (x, y): (f32, f32)) -> bool {
     inside
 }
 
+#[cfg(windows)]
 fn key_down(vk: u16) -> bool {
     // SAFETY: pure state query. The high bit means "currently down".
     unsafe { GetAsyncKeyState(i32::from(vk)) as u16 & 0x8000 != 0 }
 }
 
+#[cfg(windows)]
 fn any_button_down() -> bool {
     [VK_LBUTTON, VK_RBUTTON, VK_MBUTTON]
         .iter()
         .any(|vk| key_down(vk.0))
 }
 
+#[cfg(windows)]
 struct Shared {
     shape: Mutex<HitShape>,
     inside: AtomicBool,
     stop: AtomicBool,
 }
 
+#[cfg(windows)]
 pub struct HitTester {
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
 }
 
+#[cfg(windows)]
 impl HitTester {
     /// Starts polling. `on_change` runs on the polling thread whenever the
     /// cursor enters or leaves the shape; read [`Self::inside`] on the UI
@@ -133,6 +156,7 @@ impl HitTester {
     }
 }
 
+#[cfg(windows)]
 fn run(shared: &Shared, on_change: impl Fn(bool)) {
     let mut interactive = false;
     while !shared.stop.load(Ordering::Relaxed) {
@@ -157,11 +181,41 @@ fn run(shared: &Shared, on_change: impl Fn(bool)) {
     }
 }
 
+#[cfg(windows)]
 impl Drop for HitTester {
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::Relaxed);
         if let Some(t) = self.thread.take() {
             let _ = t.join();
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod linux {
+    use super::HitShape;
+    use crate::Result;
+
+    /// Keeps the overlay's input region on the shape. The window always
+    /// takes input inside it, so [`Self::inside`] is always true and no
+    /// pointer events need synthesizing.
+    pub struct HitTester {
+        _on_change: Box<dyn Fn(bool) + Send>,
+    }
+
+    impl HitTester {
+        pub fn spawn(on_change: impl Fn(bool) + Send + 'static) -> Result<Self> {
+            Ok(Self {
+                _on_change: Box::new(on_change),
+            })
+        }
+
+        pub fn set_shape(&self, shape: HitShape) {
+            crate::window::set_input_shape(&shape);
+        }
+
+        pub fn inside(&self) -> bool {
+            true
         }
     }
 }

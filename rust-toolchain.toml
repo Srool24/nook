@@ -1,3 +1,5 @@
 [toolchain]
-channel = "stable-x86_64-pc-windows-msvc"
+# Windows builds need the MSVC host toolchain (the default rustup host on
+# Windows); Linux builds use the native GNU one.
+channel = "stable"
 components = ["clippy", "rustfmt"]

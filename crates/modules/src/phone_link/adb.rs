@@ -161,12 +161,15 @@ fn spawn(name: &str, f: impl FnOnce() + Send + 'static) {
 
 /// Runs `adb start-server` with no console window.
 fn start_server(exe: &Path) -> bool {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    std::process::Command::new(exe)
-        .arg("start-server")
-        .creation_flags(CREATE_NO_WINDOW)
-        .stdin(std::process::Stdio::null())
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("start-server");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()

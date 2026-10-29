@@ -35,5 +35,14 @@ nook-ui.workspace = true
 nook-platform.workspace = true
 nook-modules.workspace = true
 
+# The overlay is an X11 client on Linux (XWayland on GNOME): Wayland clients
+# cannot place themselves, stay on top or let clicks through a shape.
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { workspace = true, features = ["x11"] }
+# The tray icon (AppIndicator) needs GTK running on a thread of its own.
+gtk = "0.18"
+glib = "0.18"
+image.workspace = true
+
 [build-dependencies]
 winresource = "0.1"
