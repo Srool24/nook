@@ -8,6 +8,7 @@ use x11rb::protocol::xproto::{
     AtomEnum, ColormapAlloc, ConnectionExt as _, CreateGCAux, CreateWindowAux, CursorWrapper,
     EventMask, Gcontext, ImageFormat, PropMode, Visualid, Window, WindowClass,
 };
+use x11rb::wrapper::ConnectionExt as _;
 
 /// What kind of window to make.
 pub struct Spec<'a> {
@@ -310,8 +311,6 @@ pub mod keysym {
     pub const UP: u32 = 0xff52;
     pub const RIGHT: u32 = 0xff53;
     pub const DOWN: u32 = 0xff54;
-    pub const SHIFT_L: u32 = 0xffe1;
-    pub const SHIFT_R: u32 = 0xffe2;
     pub const A: u32 = 0x61;
     pub const F: u32 = 0x66;
     pub const Z: u32 = 0x7a;

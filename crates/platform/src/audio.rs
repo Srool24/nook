@@ -13,8 +13,7 @@
 pub use linux::{play, record, stop_playback};
 
 #[cfg(windows)]
-use crate::wide;
-use crate::{PlatformError, Result};
+use crate::{PlatformError, Result, wide};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 #[cfg(windows)]

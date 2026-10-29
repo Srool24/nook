@@ -94,11 +94,6 @@ pub fn x() -> Result<&'static X> {
         .map_err(|e| PlatformError::Other(e.clone()))
 }
 
-/// Whether an X display is reachable (XWayland or an X11 session).
-pub fn available() -> bool {
-    x().is_ok()
-}
-
 /// A new connection for a thread that reads events.
 pub fn open() -> Result<X> {
     let (conn, screen) = RustConnection::connect(None).ctx("connecting to the X server")?;

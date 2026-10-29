@@ -79,6 +79,7 @@ features = [
 x11rb = { version = "0.13", features = ["shape", "randr", "xfixes", "allow-unsafe-code"] }
 zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io"] }
 libc = "0.2"
+serde.workspace = true
 # Text in burned-in annotations, the snip overlay and font matching
 # (GDI on Windows).
 ab_glyph = "0.2"

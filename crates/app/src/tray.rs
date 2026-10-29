@@ -318,19 +318,19 @@ impl Tray {
     }
 
     pub fn set_pinned(&self, pinned: bool) {
-        if std::mem::replace(&mut self.sent.borrow_mut().pin, Some(pinned)) != Some(pinned) {
+        if self.sent.borrow_mut().pin.replace(pinned) != Some(pinned) {
             Self::on_gtk(move |items| items.pin.set_checked(pinned));
         }
     }
 
     pub fn set_on_top(&self, on: bool) {
-        if std::mem::replace(&mut self.sent.borrow_mut().on_top, Some(on)) != Some(on) {
+        if self.sent.borrow_mut().on_top.replace(on) != Some(on) {
             Self::on_gtk(move |items| items.on_top.set_checked(on));
         }
     }
 
     pub fn set_startup(&self, on: bool) {
-        if std::mem::replace(&mut self.sent.borrow_mut().startup, Some(on)) != Some(on) {
+        if self.sent.borrow_mut().startup.replace(on) != Some(on) {
             Self::on_gtk(move |items| items.startup.set_checked(on));
         }
     }

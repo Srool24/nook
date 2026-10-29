@@ -51,7 +51,17 @@ struct State {
     click_through: bool,
     /// Input region in window pixels (`None`: the whole window).
     input: Option<Vec<Rectangle>>,
-    applied_input: Option<Option<Vec<Rectangle>>>,
+    /// What the X server has (`Rectangle` has no `PartialEq`).
+    applied_input: Option<Option<RectKey>>,
+}
+
+/// Rectangles as comparable tuples: (x, y, width, height).
+type RectKey = Vec<(i16, i16, u16, u16)>;
+
+fn rect_key(rects: &Option<Vec<Rectangle>>) -> Option<RectKey> {
+    rects
+        .as_ref()
+        .map(|v| v.iter().map(|r| (r.x, r.y, r.width, r.height)).collect())
 }
 
 static STATE: Mutex<Option<HashMap<u32, State>>> = Mutex::new(None);
@@ -251,7 +261,8 @@ fn apply_input(hwnd: Hwnd) -> Result<()> {
             s.input.clone()
         }
     });
-    if with_state(hwnd, |s| s.applied_input.as_ref() == Some(&want)) {
+    let key = rect_key(&want);
+    if with_state(hwnd, |s| s.applied_input.as_ref() == Some(&key)) {
         return Ok(());
     }
     let x = x()?;
@@ -275,7 +286,7 @@ fn apply_input(hwnd: Hwnd) -> Result<()> {
             .ctx("ShapeMask")?,
     };
     x.flush();
-    with_state(hwnd, |s| s.applied_input = Some(want));
+    with_state(hwnd, |s| s.applied_input = Some(key));
     Ok(())
 }
 

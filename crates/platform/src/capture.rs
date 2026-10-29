@@ -281,10 +281,12 @@ mod linux {
         let x = x()?;
         let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some()
             || std::env::var("XDG_SESSION_TYPE").is_ok_and(|t| t == "wayland");
-        if !wayland {
-            return root_image(x);
-        }
         let hidden = hide_own_windows(x);
+        if !wayland {
+            let frame = root_image(x);
+            restore(x, hidden);
+            return frame;
+        }
         let shot = portal_screenshot();
         restore(x, hidden);
         let img = shot?;
@@ -383,13 +385,26 @@ mod linux {
     /// Nook's visible windows and their opacity before they were faded out.
     type Hidden = Vec<(u32, Option<u32>)>;
 
-    /// Fades Nook's own windows out and waits for the compositor to draw a
-    /// frame without them.
+    /// Fades Nook's own windows out for the grab (they stay mapped, so
+    /// nothing re-lays out) and waits for the compositor to draw a frame
+    /// without them. GNOME always composites; on an X server without a
+    /// compositor the opacity does nothing and the panel stays in the grab.
     fn hide_own_windows(x: &X) -> Hidden {
         let pid = std::process::id();
         let prop = x.atoms._NET_WM_WINDOW_OPACITY;
         let mut hidden = Vec::new();
-        for w in x.clients() {
+        let mut windows = x.clients();
+        // Without a window manager there is no client list.
+        if windows.is_empty()
+            && let Ok(tree) = x
+                .conn
+                .query_tree(x.root)
+                .map_err(|_| ())
+                .and_then(|c| c.reply().map_err(|_| ()))
+        {
+            windows = tree.children;
+        }
+        for w in windows {
             if x.pid_of(w) != Some(pid) || !x.is_viewable(w) {
                 continue;
             }

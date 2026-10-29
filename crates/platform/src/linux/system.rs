@@ -11,8 +11,9 @@ const INTERFACE: &str = "org.gnome.desktop.interface";
 
 /// The desktop prefers a light style (GNOME's "Default" is light).
 pub fn apps_use_light_theme() -> bool {
-    if let Some(v) = dbus::read_setting("org.freedesktop.appearance", "color-scheme")
-        && let Some(n) = dbus::as_i64(&v)
+    if let Some(n) = settings::get("org.freedesktop.appearance", "color-scheme")
+        .as_ref()
+        .and_then(Setting::as_i64)
     {
         // 0 no preference, 1 prefer dark, 2 prefer light.
         return n != 1;
@@ -57,8 +58,9 @@ pub fn os_version() -> String {
 
 /// GNOME's accent color as RGB (Settings > Appearance, GNOME 47 and later).
 pub fn system_accent() -> Result<[u8; 3]> {
-    if let Some(v) = dbus::read_setting("org.freedesktop.appearance", "accent-color") {
-        let f: Vec<f64> = dbus::fields(&v).iter().filter_map(dbus::as_f64).collect();
+    if let Some(s) = settings::get("org.freedesktop.appearance", "accent-color")
+        && let Some(f) = s.as_floats()
+    {
         // Out of range means "not set".
         if let [r, g, b] = f[..]
             && [r, g, b].iter().all(|c| (0.0..=1.0).contains(c))

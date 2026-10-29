@@ -66,7 +66,7 @@ pub fn installed() -> &'static [Installed] {
         let text = super::cmd::output("fc-list", &["--format", FC_FIELDS, ":scalable=true"])
             .unwrap_or_default();
         let mut faces: Vec<Installed> = text.lines().filter_map(parse_fc_line).collect();
-        faces.sort_by(|a, b| a.family.to_lowercase().cmp(&b.family.to_lowercase()));
+        faces.sort_by_key(|f| f.family.to_lowercase());
         faces
     })
 }

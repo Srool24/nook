@@ -1,12 +1,20 @@
-//! GNOME settings (GSettings).
+//! GNOME settings (GSettings) and the portal's appearance settings.
 //!
-//! Reads go through the Settings portal first (one D-Bus round trip, which
-//! matters for the watcher that samples the theme every few seconds) and
-//! fall back to the `gsettings` tool. Writes always use `gsettings`, which
+//! Reads go through the Settings portal and are cached: the system watcher
+//! samples the theme, accent and wallpaper every second, and the portal's
+//! `SettingChanged` signal keeps the cache current, so those samples cost
+//! nothing. Without a portal, values come from the `gsettings` tool and are
+//! re-read at most every few seconds. Writes always use `gsettings`, which
 //! talks to dconf like GNOME Settings does.
 
 use super::{cmd, dbus};
 use crate::Result;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+/// How long a value read without the portal stays fresh.
+const POLL_TTL: Duration = Duration::from_secs(5);
 
 /// A setting's value, reduced to what Nook reads.
 #[derive(Clone, Debug, PartialEq)]
@@ -16,6 +24,8 @@ pub enum Setting {
     Float(f64),
     Str(String),
     Strs(Vec<String>),
+    /// A tuple of numbers, such as the portal's accent color `(ddd)`.
+    Floats(Vec<f64>),
 }
 
 impl Setting {
@@ -26,39 +36,113 @@ impl Setting {
         }
     }
 
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            Setting::Int(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    pub fn as_floats(&self) -> Option<&[f64]> {
+        match self {
+            Setting::Floats(v) => Some(v),
+            _ => None,
+        }
+    }
+
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Setting::Str(s) => Some(s),
             _ => None,
         }
     }
-
-    pub fn as_f64(&self) -> Option<f64> {
-        match self {
-            Setting::Int(n) => Some(*n as f64),
-            Setting::Float(f) => Some(*f),
-            _ => None,
-        }
-    }
-
-    pub fn as_strs(&self) -> Option<&[String]> {
-        match self {
-            Setting::Strs(v) => Some(v),
-            _ => None,
-        }
-    }
 }
 
-/// Reads `schema` / `key`, e.g. `("org.gnome.desktop.interface", "color-scheme")`.
+type Key = (String, String);
+
+struct Cache {
+    values: HashMap<Key, (Instant, Option<Setting>)>,
+}
+
+fn cache() -> &'static Mutex<Cache> {
+    static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        Mutex::new(Cache {
+            values: HashMap::new(),
+        })
+    })
+}
+
+/// Whether the portal answers and its change signal is being followed
+/// (then cached values never go stale).
+fn following() -> bool {
+    static FOLLOWING: OnceLock<bool> = OnceLock::new();
+    *FOLLOWING.get_or_init(|| {
+        dbus::read_setting("org.freedesktop.appearance", "color-scheme").is_some()
+            && follow_changes().is_ok()
+    })
+}
+
+/// Updates cached values from the portal's `SettingChanged` signal.
+fn follow_changes() -> Result<()> {
+    let conn = dbus::session()?;
+    let rule = zbus::MatchRule::builder()
+        .msg_type(zbus::message::Type::Signal)
+        .interface("org.freedesktop.portal.Settings")
+        .and_then(|b| b.member("SettingChanged"))
+        .map_err(|e| crate::PlatformError::other("settings match rule", e))?
+        .build();
+    let iter = zbus::blocking::MessageIterator::for_match_rule(rule, conn, Some(64))
+        .map_err(|e| crate::PlatformError::other("subscribing to setting changes", e))?;
+    std::thread::Builder::new()
+        .name("nook-settings".into())
+        .spawn(move || {
+            for msg in iter.flatten() {
+                let Ok((ns, key, value)) = msg
+                    .body()
+                    .deserialize::<(String, String, zbus::zvariant::OwnedValue)>()
+                else {
+                    continue;
+                };
+                let mut c = cache().lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(entry) = c.values.get_mut(&(ns, key)) {
+                    *entry = (Instant::now(), from_value(&value));
+                }
+            }
+        })
+        .map_err(|e| crate::PlatformError::other("spawning the settings listener", e))?;
+    Ok(())
+}
+
+/// Reads `schema` / `key`, e.g. `("org.gnome.desktop.interface",
+/// "color-scheme")` or `("org.freedesktop.appearance", "accent-color")`.
 pub fn get(schema: &str, key: &str) -> Option<Setting> {
+    let live = following();
+    let k = (schema.to_owned(), key.to_owned());
+    if let Some((at, v)) = cache().lock().unwrap_or_else(|e| e.into_inner()).values.get(&k)
+        && (live || at.elapsed() < POLL_TTL)
+    {
+        return v.clone();
+    }
+    let v = read(schema, key);
+    cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .values
+        .insert(k, (Instant::now(), v.clone()));
+    v
+}
+
+fn read(schema: &str, key: &str) -> Option<Setting> {
     if let Some(v) = dbus::read_setting(schema, key)
         && let Some(s) = from_value(&v)
     {
         return Some(s);
     }
-    if cmd::which("gsettings").is_none() {
-        return None;
+    if schema.starts_with("org.freedesktop.") {
+        return None; // portal-only namespaces
     }
+    cmd::which("gsettings")?;
     let text = cmd::output("gsettings", &["get", schema, key]).ok()?;
     parse_gvariant(&text)
 }
@@ -70,6 +154,7 @@ fn from_value(v: &zbus::zvariant::Value<'_>) -> Option<Setting> {
         Value::Str(s) => Setting::Str(s.to_string()),
         Value::F64(f) => Setting::Float(*f),
         Value::Array(_) => Setting::Strs(dbus::as_strs(v)),
+        Value::Structure(_) => Setting::Floats(dbus::fields(v).iter().filter_map(dbus::as_f64).collect()),
         other => Setting::Int(dbus::as_i64(other)?),
     })
 }

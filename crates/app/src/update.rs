@@ -607,7 +607,11 @@ mod tests {
     fn parses_github_json() {
         let json = r#"{"tag_name":"v9.9.9","html_url":"https://x","draft":false,
             "prerelease":false,"assets":[{"name":"Nook-Setup-9.9.9.exe",
-            "browser_download_url":"https://x/a.exe","size":5,"digest":null}]}"#;
+            "browser_download_url":"https://x/a.exe","size":5,"digest":null},
+            {"name":"nook-9.9.9-1.fc43.x86_64.rpm",
+            "browser_download_url":"https://x/a.rpm","size":5,"digest":null},
+            {"name":"nook-9.9.9-1.fc43.aarch64.rpm",
+            "browser_download_url":"https://x/b.rpm","size":5,"digest":null}]}"#;
         let api: ApiRelease = serde_json::from_str(json).expect("parse");
         let r = pick(api, "0.1.0").expect("release");
         assert_eq!(r.sha256, None);

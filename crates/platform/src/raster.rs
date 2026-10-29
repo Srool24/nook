@@ -14,6 +14,7 @@ use crate::PlatformError;
 use crate::Result;
 #[cfg(windows)]
 use windows::Win32::Foundation::{COLORREF, RECT, SIZE};
+#[cfg(windows)]
 use windows::Win32::Graphics::Gdi::{
     ANTIALIASED_QUALITY, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC,
     CreateDIBSection, CreateFontIndirectW, DIB_RGB_COLORS, DT_NOCLIP, DT_NOPREFIX, DT_SINGLELINE,

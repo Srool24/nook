@@ -507,12 +507,12 @@ mod tests {
     use super::*;
     use crate::plugins::manifest::Manifest;
 
-    /// A plugin folder in the temp dir with `plugin.toml` and `echo.ps1`.
+    /// A plugin folder in the temp dir with `plugin.toml` and [`SCRIPT`].
     fn plugin(name: &str, toml: &str, script: &str) -> Found {
         let dir =
             std::env::temp_dir().join(format!("nook-plugin-test-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("echo.ps1"), script).unwrap();
+        std::fs::write(dir.join(SCRIPT), script).unwrap();
         Found {
             manifest: Manifest::parse(toml).unwrap(),
             dir,
@@ -540,13 +540,36 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    const SCRIPT: &str = "echo.ps1";
+    #[cfg(windows)]
     const RUN: &str =
         r#"run = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "echo.ps1"]"#;
+    #[cfg(not(windows))]
+    const SCRIPT: &str = "echo.py";
+    #[cfg(not(windows))]
+    const RUN: &str = r#"run = ["python3", "echo.py"]"#;
 
-    #[test]
-    fn live_plugin_round_trip() {
-        // Answers every message with a text tile naming its type (and id).
-        let script = r#"
+    /// Answers every message with a text tile naming its type (and id).
+    #[cfg(not(windows))]
+    const LIVE: &str = r#"
+import json, sys
+for line in sys.stdin:
+    m = json.loads(line)
+    t = (m.get("type", "") + " " + (m.get("id") or "")).strip()
+    print(json.dumps({"type": "text", "text": t}), flush=True)
+    if m.get("type") == "shutdown":
+        break
+"#;
+    #[cfg(not(windows))]
+    const POLL: &str = r#"
+import json, os
+e = json.loads(os.environ["NOOK_EVENT"])["id"] if os.environ.get("NOOK_EVENT") else "none"
+print(json.dumps({"type": "text", "text": os.environ["NOOK_PLUGIN_ID"] + " " + e}))
+"#;
+
+    #[cfg(windows)]
+    const LIVE: &str = r#"
             while ($null -ne ($line = [Console]::In.ReadLine())) {
                 $m = $line | ConvertFrom-Json
                 $t = "$($m.type) $($m.id)".Trim()
@@ -554,6 +577,15 @@ mod tests {
                 if ($m.type -eq 'shutdown') { break }
             }
         "#;
+    #[cfg(windows)]
+    const POLL: &str = r#"
+            $e = if ($env:NOOK_EVENT) { ($env:NOOK_EVENT | ConvertFrom-Json).id } else { 'none' }
+            Write-Output (@{ type = 'text'; text = "$env:NOOK_PLUGIN_ID $e" } | ConvertTo-Json)
+        "#;
+
+    #[test]
+    fn live_plugin_round_trip() {
+        let script = LIVE;
         let found = plugin(
             "live",
             &format!("id = \"echo\"\nname = \"Echo\"\n{RUN}"),
@@ -568,10 +600,7 @@ mod tests {
 
     #[test]
     fn poll_plugin_reruns_with_event() {
-        let script = r#"
-            $e = if ($env:NOOK_EVENT) { ($env:NOOK_EVENT | ConvertFrom-Json).id } else { 'none' }
-            Write-Output (@{ type = 'text'; text = "$env:NOOK_PLUGIN_ID $e" } | ConvertTo-Json)
-        "#;
+        let script = POLL;
         let toml =
             format!("id = \"poller\"\nname = \"P\"\nmode = \"poll\"\ninterval = 3600\n{RUN}");
         let found = plugin("poll", &toml, script);
