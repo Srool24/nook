@@ -335,7 +335,10 @@ fn system_text_fonts() -> (Option<FontData>, Option<FontData>) {
 
 /// Regular and semibold text faces from fontconfig, if found. A variable
 /// font (Fedora ships Noto Sans as one) is used for both, at the `wght`
-/// axis values 400 and 600.
+/// axis values 400 and 600. fontconfig reports a variable font's named
+/// instance as `instance << 16 | face`, and does not flag it as variable,
+/// so the face index is the low 16 bits and the axis is set whenever the
+/// font has one.
 #[cfg(not(windows))]
 fn system_text_fonts() -> (Option<FontData>, Option<FontData>) {
     for family in ["Noto Sans", "DejaVu Sans", "sans-serif"] {
@@ -352,7 +355,7 @@ fn fc_match(family: &str, weight: &str, wght: f32) -> Option<FontData> {
     let out = std::process::Command::new("fc-match")
         .args([
             "-f",
-            "%{family[0]}\n%{file}\n%{index}\n%{variable}",
+            "%{family[0]}\n%{file}\n%{index}",
             &format!("{family}:weight={weight}"),
         ])
         .output()
@@ -364,8 +367,8 @@ fn fc_match(family: &str, weight: &str, wght: f32) -> Option<FontData> {
     let index: u32 = lines
         .next()
         .and_then(|i| i.trim().parse().ok())
-        .unwrap_or(0);
-    let variable = lines.next().is_some_and(|v| v.trim() == "True");
+        .unwrap_or(0)
+        & 0xFFFF;
     // fontconfig always answers; only take a substitute for the generic name.
     if family != "sans-serif" && !found.eq_ignore_ascii_case(family) {
         return None;
@@ -373,7 +376,7 @@ fn fc_match(family: &str, weight: &str, wght: f32) -> Option<FontData> {
     let bytes = std::fs::read(file).ok()?;
     let mut data = FontData::from_owned(bytes);
     data.index = index;
-    if variable {
+    if data.variation_axes().iter().any(|a| a.tag == "wght") {
         data.tweak.coords = egui::epaint::text::VariationCoords::new([(b"wght", wght)]);
     }
     Some(data)

@@ -42,8 +42,11 @@ fn parse_fc_line(line: &str) -> Option<Installed> {
     let weight_field = it.next()?;
     let slant = number(it.next()?);
     let file = PathBuf::from(it.next()?.trim());
-    let index = it.next()?.trim().parse().unwrap_or(0);
-    let variable = it.next().is_some_and(|v| v.trim() == "True");
+    // A variable font's named instance is `instance << 16 | face`, and
+    // fontconfig does not flag such an instance as variable.
+    let raw_index: u32 = it.next()?.trim().parse().unwrap_or(0);
+    let index = raw_index & 0xFFFF;
+    let variable = it.next().is_some_and(|v| v.trim() == "True") || raw_index >> 16 != 0;
     let weight = if weight_field.trim().starts_with('[') {
         80
     } else {
@@ -77,13 +80,12 @@ pub fn fc_match(pattern: &str) -> Option<Installed> {
     text.lines().next().and_then(parse_fc_line)
 }
 
-/// Loads a face, at the `wght` given for a variable font.
+/// Loads a face, at the `wght` given when it is a variable font (setting
+/// an axis a static font lacks does nothing).
 pub fn load(face: &Installed, wght: Option<f32>) -> Option<FontVec> {
     let bytes = std::fs::read(&face.file).ok()?;
     let mut font = FontVec::try_from_vec_and_index(bytes, face.index).ok()?;
-    if face.variable
-        && let Some(w) = wght
-    {
+    if let Some(w) = wght {
         font.set_variation(b"wght", w);
     }
     Some(font)
@@ -115,9 +117,10 @@ pub fn styled(family: &str, bold: bool, italic: bool) -> Option<Styled> {
         slant_miss + weight_miss
     })?;
     let font = load(best, Some(if bold { 700.0 } else { 400.0 }))?;
+    let variable = best.variable || !font.variations().is_empty();
     Some(Styled {
         font: Arc::new(font),
-        fake_bold: bold && !best.variable && best.weight < 150,
+        fake_bold: bold && !variable && best.weight < 150,
         fake_italic: italic && best.slant == 0,
     })
 }
@@ -312,6 +315,14 @@ mod tests {
         .expect("line");
         assert_eq!((g.weight, g.slant, g.variable), (200, 100, false));
         assert!(parse_fc_line("broken").is_none());
+        // fontconfig's semibold named instance of Fedora's variable Noto
+        // Sans: instance 6 in the high bits, not flagged as variable.
+        let named = parse_fc_line(
+            "Noto Sans\t180\t0\t/usr/share/fonts/google-noto-vf/NotoSans[wght].ttf\t393216\tFalse",
+        )
+        .expect("line");
+        assert_eq!(named.index, 0);
+        assert!(named.variable);
     }
 
     #[test]
