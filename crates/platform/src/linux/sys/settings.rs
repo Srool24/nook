@@ -119,7 +119,11 @@ fn follow_changes() -> Result<()> {
 pub fn get(schema: &str, key: &str) -> Option<Setting> {
     let live = following();
     let k = (schema.to_owned(), key.to_owned());
-    if let Some((at, v)) = cache().lock().unwrap_or_else(|e| e.into_inner()).values.get(&k)
+    if let Some((at, v)) = cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .values
+        .get(&k)
         && (live || at.elapsed() < POLL_TTL)
     {
         return v.clone();
@@ -154,7 +158,9 @@ fn from_value(v: &zbus::zvariant::Value<'_>) -> Option<Setting> {
         Value::Str(s) => Setting::Str(s.to_string()),
         Value::F64(f) => Setting::Float(*f),
         Value::Array(_) => Setting::Strs(dbus::as_strs(v)),
-        Value::Structure(_) => Setting::Floats(dbus::fields(v).iter().filter_map(dbus::as_f64).collect()),
+        Value::Structure(_) => {
+            Setting::Floats(dbus::fields(v).iter().filter_map(dbus::as_f64).collect())
+        }
         other => Setting::Int(dbus::as_i64(other)?),
     })
 }

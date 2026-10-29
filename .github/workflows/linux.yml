@@ -20,8 +20,8 @@ jobs:
         run: |
           dnf install -y git tar gzip cargo rust clippy rustfmt gcc gtk3-devel \
             rpm-build desktop-file-utils libappstream-glib \
-            xorg-x11-server-Xvfb dbus-daemon fontconfig google-noto-sans-vf-fonts \
-            tesseract tesseract-langpack-eng
+            xorg-x11-server-Xvfb xorg-x11-xauth which dbus-daemon python3 \
+            fontconfig google-noto-sans-vf-fonts tesseract tesseract-langpack-eng
       - uses: actions/checkout@v4
       - name: Cache
         uses: actions/cache@v4

@@ -23,6 +23,8 @@ BuildRequires:  gcc
 BuildRequires:  pkgconfig(gtk+-3.0)
 BuildRequires:  desktop-file-utils
 BuildRequires:  libappstream-glib
+# The plugin host tests run Python plugins.
+BuildRequires:  python3
 
 # Loaded at run time (dlopen), so rpm cannot see them by itself.
 Requires:       libX11
