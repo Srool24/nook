@@ -159,6 +159,10 @@ npx wrangler@4.153.0 d1 execute nook-stats --remote --file migrations/0002_usage
   **Pin open** to keep the panel open. A small pin shows at the top center.
 - **Position:** Settings, Position: Left, Center or Right. In a corner
   the panel opens toward the other side.
+- **Drag** the glass to move the notch anywhere on the screen; the panel
+  opens around it and stays on the monitor. Drop it near the left corner,
+  the center or the right corner of the top edge and it snaps there.
+  Picking a Position in Settings puts it back on the top edge.
 - **Always on top:** on by default. Turn it off in Settings or the tray
   to keep Nook behind your windows (it still shows on the desktop).
   Ctrl+Alt+N brings it back on top.

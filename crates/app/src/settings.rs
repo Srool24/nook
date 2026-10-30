@@ -246,10 +246,20 @@ pub fn page(
                 .iter()
                 .position(|&p| p == cfg.placement)
                 .unwrap_or(1);
+            // A dragged notch goes back to a slot on any click, even on the
+            // slot it was dragged from.
+            let dragged = cfg.notch_x.is_some() || cfg.notch_y > 0.0;
             if row(&mut lui, "Position", theme, |ui| {
-                widgets::segmented(ui, &["Left", "Center", "Right"], &mut pos_idx, theme)
+                let mut resp =
+                    widgets::segmented(ui, &["Left", "Center", "Right"], &mut pos_idx, theme);
+                if dragged && resp.clicked() {
+                    resp.mark_changed();
+                }
+                resp.on_hover_text("Or drag the notch to move it anywhere")
             }) {
                 cfg.placement = Placement::ALL[pos_idx];
+                cfg.notch_x = None;
+                cfg.notch_y = 0.0;
                 out.changed = true;
             }
             let mut hide = cfg.hide_in_fullscreen;

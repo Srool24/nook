@@ -48,6 +48,11 @@ pub fn spring(ctx: &Context, id: Id, target: f32, params: SpringParams) -> f32 {
     spring_from(ctx, id, target, target, params)
 }
 
+/// Forgets the spring at `id`, so the next call starts over.
+pub fn reset_spring(ctx: &Context, id: Id) {
+    ctx.data_mut(|d| d.remove::<SpringSlot>(id));
+}
+
 /// Like [`spring`], but the first call starts at `initial`.
 pub fn spring_from(ctx: &Context, id: Id, initial: f32, target: f32, params: SpringParams) -> f32 {
     let now = ctx.input(|i| i.time);

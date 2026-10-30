@@ -88,6 +88,11 @@ pub struct Config {
     pub grain_size: GrainSize,
     /// Top-left corner, top center or top-right corner.
     pub placement: Placement,
+    /// Where the notch was dragged, instead of `placement`: its center as
+    /// a fraction of the monitor's width (0 = left edge, 1 = right edge).
+    pub notch_x: Option<f32>,
+    /// How far the notch was dragged down from the top, in points.
+    pub notch_y: f32,
     /// Above all windows (true) or behind them.
     pub on_top: bool,
     /// Fade the notch out while a fullscreen app (game, video) is in front
@@ -122,6 +127,8 @@ impl Default for Config {
             grain: DEFAULT_GRAIN,
             grain_size: GrainSize::Fine,
             placement: Placement::Center,
+            notch_x: None,
+            notch_y: 0.0,
             on_top: true,
             hide_in_fullscreen: false,
             hover_delay_ms: 120,

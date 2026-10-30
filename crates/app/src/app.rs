@@ -24,7 +24,7 @@ use nook_ui::bento;
 use nook_ui::geometry::Squircle;
 use nook_ui::module::{Badge, Module, Registry};
 use nook_ui::paint;
-use nook_ui::shell::{Shell, ShellMetrics, ShellOutput};
+use nook_ui::shell::{Shell, ShellDrag, ShellMetrics, ShellOutput};
 use nook_ui::shell_state::ShellTimings;
 use nook_ui::theme::{self, FALLBACK_ACCENT, SIZE_BODY, SIZE_LABEL, Theme, ThemeMode};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -155,6 +155,10 @@ pub struct NookApp {
     trimmed: bool,
     /// Window rect in physical pixels: (x, y, w, h).
     anchor: Option<(i32, i32, i32, i32)>,
+    /// Cursor y (physical px) and `cfg.notch_y` when a drag of the notch
+    /// began. The window moves under the pointer, so the vertical part is
+    /// measured on screen.
+    drag_y: Option<(i32, f32)>,
     activatable: bool,
     /// GitHub release checks and the in-place update.
     updater: Updater,
@@ -248,6 +252,7 @@ impl NookApp {
         let timings = timings(&cfg);
         let mut shell = Shell::new(ShellMetrics::default(), timings);
         shell.placement = cfg.placement;
+        shell.free_x = cfg.notch_x;
         // Dev flags (screenshots/demos): `--pinned` starts expanded and
         // pinned, `--settings` additionally opens the settings page.
         // `--page=<module id>` opens that module's page.
@@ -313,6 +318,7 @@ impl NookApp {
             collapsed_since: None,
             trimmed: false,
             anchor: None,
+            drag_y: None,
             activatable: false,
             updater,
             stats,
@@ -458,15 +464,19 @@ impl NookApp {
         self.save_config();
     }
 
-    /// Spans the window across the top of the target monitor's work area.
-    /// The shell positions itself inside it (left, center or right).
+    /// Spans the window across the top of the target monitor's work area,
+    /// `cfg.notch_y` below it if the notch was dragged down (kept so the
+    /// open panel still fits on the monitor). The shell positions itself
+    /// inside it (left, center, right or where it was dragged).
     fn anchor_window(&mut self) {
         let Some(mon) = self.sys.monitor else {
             return;
         };
         let scale = window::dpi(self.hwnd) as f32 / 96.0;
         let h = (self.shell.window_size().y * scale).ceil() as i32;
-        let rect = (mon.work.left, mon.work.top, mon.work.width(), h);
+        let room = (mon.work.height() - h).max(0);
+        let dy = ((self.cfg.notch_y * scale).round() as i32).clamp(0, room);
+        let rect = (mon.work.left, mon.work.top + dy, mon.work.width(), h);
         if self.anchor != Some(rect) {
             match window::set_rect(self.hwnd, rect.0, rect.1, rect.2, rect.3) {
                 Ok(()) => {
@@ -481,6 +491,36 @@ impl NookApp {
     /// Lets clicks through everywhere except on the shell (and keeps input
     /// while a button pressed on it is held). The hit tester decides; the window
     /// style can only be changed safely from this thread.
+    /// Follows a drag of the notch: the shell moves itself along the edge,
+    /// this moves the window down with the pointer and saves the drop.
+    fn follow_drag(&mut self, drag: Option<ShellDrag>) {
+        let Some(drag) = drag else {
+            return;
+        };
+        let scale = window::dpi(self.hwnd) as f32 / 96.0;
+        let cursor_y = nook_platform::monitor::cursor_pos().ok().map(|(_, y)| y);
+        if let ShellDrag::Started { moved } = drag {
+            // From the press: the pointer has already crossed the drag
+            // threshold (the window has not moved yet).
+            let pressed_at = |y: i32| y - (moved.y * scale).round() as i32;
+            self.drag_y = cursor_y.map(|y| (pressed_at(y), self.cfg.notch_y));
+        }
+        if let (Some((y0, from)), Some(y)) = (self.drag_y, cursor_y) {
+            let room = self.sys.monitor.map_or(0.0, |m| {
+                (m.work.height() as f32 / scale - self.shell.window_size().y).max(0.0)
+            });
+            let y = (from + (y - y0) as f32 / scale).clamp(0.0, room);
+            // Back against the top edge within a few points.
+            self.cfg.notch_y = if y < 8.0 { 0.0 } else { y.round() };
+        }
+        if drag == ShellDrag::Ended {
+            self.drag_y = None;
+            self.cfg.placement = self.shell.placement;
+            self.cfg.notch_x = self.shell.free_x;
+            self.save_config();
+        }
+    }
+
     fn apply_click_through(&mut self) {
         let through = !self.hit.as_ref().is_none_or(HitTester::inside);
         // Checked against the real style every frame (one read, a write only
@@ -1182,6 +1222,7 @@ impl eframe::App for NookApp {
             },
         );
 
+        self.follow_drag(out.drag);
         if let Some(id) = clicked {
             self.stats.tool(id);
         }
@@ -1226,6 +1267,7 @@ impl eframe::App for NookApp {
         if settings_out.changed {
             self.shell.timings = timings(&self.cfg);
             self.shell.placement = self.cfg.placement;
+            self.shell.free_x = self.cfg.notch_x;
             self.watcher.set_monitor_mode(self.cfg.monitor);
             nook_modules::plugins::set_dev_mode(self.cfg.plugin_dev);
             self.stats.set_enabled(self.cfg.usage_stats);

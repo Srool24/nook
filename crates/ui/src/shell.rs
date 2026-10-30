@@ -5,7 +5,10 @@
 //! The OS window spans the whole width of the monitor's work area, so where
 //! the notch sits (left corner, center, right corner) only moves the shape
 //! inside the window, and switching slots springs it across; the window
-//! itself never moves. A notch in a corner grows away from its edge.
+//! itself never moves sideways. A notch in a corner grows away from its edge.
+//! Dragging the glass moves the notch anywhere along the edge (`free_x`,
+//! where it then grows both ways around its center, kept on the monitor);
+//! the app moves the window down for the vertical part.
 
 use crate::anim::{self, ease_out_cubic};
 use crate::geometry::{CORNER_EXPONENT, Squircle, lerp};
@@ -114,6 +117,19 @@ impl ContentCtx {
     }
 }
 
+/// A drag of the glass this frame (moving the notch).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ShellDrag {
+    /// The pointer has moved past the drag threshold; `moved` is how far
+    /// it went since the press, in points.
+    Started {
+        moved: Vec2,
+    },
+    Moved,
+    /// Released; `free_x` and `placement` hold where it was dropped.
+    Ended,
+}
+
 pub struct ShellOutput {
     /// Current shape in window coordinates (points). Drive hit-testing with it.
     pub shape: Squircle,
@@ -123,6 +139,7 @@ pub struct ShellOutput {
     pub visible: bool,
     /// Whole-shell opacity (fullscreen fade).
     pub opacity: f32,
+    pub drag: Option<ShellDrag>,
 }
 
 pub struct Shell {
@@ -131,6 +148,9 @@ pub struct Shell {
     pub state: ShellState,
     /// Resting slot along the top edge.
     pub placement: Placement,
+    /// Where the notch was dragged, instead of `placement`: its center as
+    /// a fraction of the window width.
+    pub free_x: Option<f32>,
     /// Treat the shell as hovered whatever the pointer does (typing in it,
     /// files being dragged over it).
     pub hold_open: bool,
@@ -144,6 +164,11 @@ pub struct Shell {
     outline: Vec<Pos2>,
     last_shape: Option<Squircle>,
     reveal_start: Option<f64>,
+    /// Shell center and pointer x when the current drag began.
+    drag_from: Option<(f32, f32)>,
+    /// Whether the last frame was placed by `free_x` (leaving it springs
+    /// from there to the slot).
+    was_free: bool,
 }
 
 impl Shell {
@@ -153,6 +178,7 @@ impl Shell {
             timings,
             state: ShellState::default(),
             placement: Placement::default(),
+            free_x: None,
             hold_open: false,
             expanded_override: None,
             tall: metrics.expanded.y,
@@ -160,7 +186,53 @@ impl Shell {
             outline: Vec::new(),
             last_shape: None,
             reveal_start: None,
+            drag_from: None,
+            was_free: false,
         }
+    }
+
+    /// Follows a drag of the glass: the shell's center moves with the
+    /// pointer. A drop within a few points of a slot snaps to it.
+    fn drag(&mut self, resp: &egui::Response, window: Rect, shape: Squircle) -> Option<ShellDrag> {
+        const SNAP: f32 = 12.0;
+        let x = resp.interact_pointer_pos().map(|p| p.x);
+        if resp.drag_started()
+            && let Some(p) = resp.interact_pointer_pos()
+        {
+            // Measured from the press, not from where the drag threshold
+            // was crossed, so the notch does not lag the pointer.
+            let origin = resp.ctx.input(|i| i.pointer.press_origin()).unwrap_or(p);
+            self.drag_from = Some((shape.rect.center().x, origin.x));
+            self.free_x =
+                Some(((shape.rect.center().x + p.x - origin.x) / window.width()).clamp(0.0, 1.0));
+            return Some(ShellDrag::Started { moved: p - origin });
+        }
+        let (cx, x0) = self.drag_from?;
+        if let Some(x) = x {
+            self.free_x = Some(((cx + x - x0) / window.width()).clamp(0.0, 1.0));
+        }
+        // Also ends a drag whose release this response never saw.
+        if resp.dragged() && !resp.drag_stopped() {
+            return Some(ShellDrag::Moved);
+        }
+        self.drag_from = None;
+        let (lo, hi) = self.left_range(window, shape.rect.width());
+        let left = self.left_for(window, shape.rect.width(), 0.5);
+        let center = self.free_x.unwrap_or(0.5) * window.width();
+        let snap = if left <= lo + SNAP {
+            Some(Placement::Left)
+        } else if left >= hi - SNAP {
+            Some(Placement::Right)
+        } else if (center - window.center().x).abs() < SNAP {
+            Some(Placement::Center)
+        } else {
+            None
+        };
+        if let Some(p) = snap {
+            self.placement = p;
+            self.free_x = None;
+        }
+        Some(ShellDrag::Ended)
     }
 
     /// The expanded size currently wanted.
@@ -178,11 +250,30 @@ impl Shell {
         m.window_size()
     }
 
-    /// Left edge for a shell of `width` at anchor fraction `frac`.
-    fn left_for(&self, window: Rect, width: f32, frac: f32) -> f32 {
+    /// Lowest and highest left edge for a shell of `width`.
+    fn left_range(&self, window: Rect, width: f32) -> (f32, f32) {
         let lo = window.min.x + self.metrics.side_margin;
         let hi = (window.max.x - self.metrics.side_margin - width).max(lo);
-        lerp(lo, hi, frac)
+        (lo, hi)
+    }
+
+    /// Left edge for a shell of `width`: centered on `free_x` if the notch
+    /// was dragged, else at anchor fraction `frac`.
+    fn left_for(&self, window: Rect, width: f32, frac: f32) -> f32 {
+        let (lo, hi) = self.left_range(window, width);
+        match self.free_x {
+            Some(c) => (c * window.width() - width * 0.5).clamp(lo, hi),
+            None => lerp(lo, hi, frac),
+        }
+    }
+
+    /// The anchor fraction a shell of `width` is at when placed by `free_x`.
+    fn free_frac(&self, window: Rect, width: f32) -> f32 {
+        let (lo, hi) = self.left_range(window, width);
+        if hi <= lo {
+            return 0.5;
+        }
+        (self.left_for(window, width, 0.5) - lo) / (hi - lo)
     }
 
     fn shape_for(&self, window: Rect, size: Vec2, progress: f32, frac: f32) -> Squircle {
@@ -226,14 +317,17 @@ impl Shell {
                     _ => false,
                 });
 
-        // Click on the glass (not on a tile) pins / unpins.
+        // Click on the glass (not on a tile) pins / unpins; dragging it
+        // moves the notch.
+        let mut drag = None;
         if let Some(shape) = self.last_shape
             && !hidden
         {
-            let resp = ui.interact(shape.rect, self.id.with("bg"), Sense::click());
+            let resp = ui.interact(shape.rect, self.id.with("bg"), Sense::click_and_drag());
             if resp.clicked() {
                 self.state.toggle_pin(now);
             }
+            drag = self.drag(&resp, window, shape);
         }
 
         let targets = self.state.update(now, hovered, &self.timings);
@@ -283,13 +377,35 @@ impl Shell {
             self.tall = expanded.y.max(m.expanded.y);
         }
 
-        // Horizontal anchor; a new placement springs across the top edge.
-        let frac = anim::spring(
-            &ctx,
-            self.id.with("x"),
-            self.placement.frac(),
-            SpringParams::with_overshoot(240.0, 0.03),
-        );
+        // Horizontal anchor; a new placement springs across the top edge
+        // (from where a dragged notch was, once it goes back to a slot).
+        let x_id = self.id.with("x");
+        let frac = match self.free_x {
+            Some(_) => {
+                self.was_free = true;
+                self.free_frac(window, w)
+            }
+            None => {
+                if std::mem::take(&mut self.was_free) {
+                    anim::reset_spring(&ctx, x_id);
+                }
+                let from = self.last_shape.map_or(self.placement.frac(), |s| {
+                    let (lo, hi) = self.left_range(window, s.rect.width());
+                    if hi > lo {
+                        (s.rect.min.x - lo) / (hi - lo)
+                    } else {
+                        0.5
+                    }
+                });
+                anim::spring_from(
+                    &ctx,
+                    x_id,
+                    from,
+                    self.placement.frac(),
+                    SpringParams::with_overshoot(240.0, 0.03),
+                )
+            }
+        };
         let shape = self.shape_for(window, vec2(w, h), progress, frac);
         shape.outline_into(&mut self.outline);
         self.last_shape = Some(shape);
@@ -301,6 +417,7 @@ impl Shell {
                 progress,
                 visible,
                 opacity,
+                drag,
             };
         }
 
@@ -343,8 +460,13 @@ impl Shell {
             let panel = self.shape_for(window, expanded, 1.0, frac).rect;
             let scale = lerp(0.96, 1.0, ease_out_cubic(progress.clamp(0.0, 1.0)));
             // Grow out of the anchored side: the top center for a centered
-            // notch, the top outer corner for one in a corner.
-            let c = vec2(lerp(panel.min.x, panel.max.x, frac), panel.min.y);
+            // notch, the top outer corner for one in a corner, the dragged
+            // notch's center otherwise.
+            let cx = match self.free_x {
+                Some(c) => (c * window.width()).clamp(panel.min.x, panel.max.x),
+                None => lerp(panel.min.x, panel.max.x, frac),
+            };
+            let c = vec2(cx, panel.min.y);
             let transform = TSTransform::new(c * (1.0 - scale), scale);
             let cctx = ContentCtx {
                 panel,
@@ -373,6 +495,7 @@ impl Shell {
             progress,
             visible,
             opacity,
+            drag,
         }
     }
 }
@@ -380,6 +503,88 @@ impl Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs frames of a shell in a 1536 x 300 window, feeding `events` one
+    /// frame each, and returns what each frame reported.
+    fn drive(shell: &mut Shell, events: Vec<Vec<egui::Event>>) -> Vec<ShellOutput> {
+        let ctx = egui::Context::default();
+        let theme = Theme::styled(true, egui::Color32::WHITE, false, &Default::default());
+        let mut outs = Vec::new();
+        for (frame, events) in std::iter::repeat_n(Vec::new(), 3).chain(events).enumerate() {
+            let raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1536.0, 300.0))),
+                time: Some(frame as f64 / 60.0),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(raw, |ui| {
+                outs.push(shell.show(ui, &theme, false, false, |_, _, _| {}, |_, _| {}));
+            });
+            out.textures_delta.clear();
+        }
+        outs
+    }
+
+    fn button(pos: Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        }
+    }
+
+    #[test]
+    fn dragging_the_glass_moves_the_notch() {
+        let mut shell = Shell::new(ShellMetrics::default(), ShellTimings::default());
+        let start = pos2(768.0, 20.0);
+        let mut events = vec![
+            vec![egui::Event::PointerMoved(start)],
+            vec![button(start, true)],
+        ];
+        for i in 1..=10 {
+            events.push(vec![egui::Event::PointerMoved(
+                start + vec2(-40.0 * i as f32, 0.0),
+            )]);
+        }
+        let end = start + vec2(-400.0, 0.0);
+        events.push(vec![button(end, false)]);
+        let outs = drive(&mut shell, events);
+        let drags: Vec<ShellDrag> = outs.iter().filter_map(|o| o.drag).collect();
+        assert!(matches!(drags.first(), Some(ShellDrag::Started { .. })));
+        assert_eq!(drags.last(), Some(&ShellDrag::Ended));
+        // The notch's center ends under the pointer.
+        let center = shell.free_x.expect("dragged off its slot") * 1536.0;
+        assert!(
+            (center - end.x).abs() < 1.0,
+            "center {center}, pointer {}",
+            end.x
+        );
+        let shape = outs.last().unwrap().shape.rect;
+        assert!((shape.center().x - end.x).abs() < 1.0, "{shape:?}");
+        // Not a click: the drag does not pin the panel.
+        assert!(!shell.state.is_pinned());
+    }
+
+    #[test]
+    fn a_drop_near_a_slot_snaps_to_it() {
+        let mut shell = Shell::new(ShellMetrics::default(), ShellTimings::default());
+        shell.free_x = Some(0.3);
+        let m = shell.metrics;
+        let start = pos2(0.3 * 1536.0, 20.0);
+        // To 4 points short of the left corner.
+        let end = pos2(m.side_margin + m.collapsed.x * 0.5 + 4.0, 20.0);
+        let events = vec![
+            vec![egui::Event::PointerMoved(start)],
+            vec![button(start, true)],
+            vec![egui::Event::PointerMoved(start.lerp(end, 0.5))],
+            vec![egui::Event::PointerMoved(end)],
+            vec![button(end, false)],
+        ];
+        drive(&mut shell, events);
+        assert_eq!(shell.placement, Placement::Left);
+        assert_eq!(shell.free_x, None);
+    }
 
     #[test]
     fn corner_shells_hug_their_edge() {
