@@ -406,6 +406,20 @@ pub fn set_rect(hwnd: Hwnd, x: i32, y: i32, w: i32, h: i32) -> Result<()> {
         return Err(PlatformError::Other("empty window rectangle".into()));
     }
     let xc = crate::sys::x11::x()?;
+    // winit pins a non-resizable window's minimum and maximum size to its
+    // first size, and Mutter holds the window to them: Nook stayed in the
+    // top-left corner at that size. Pin them to the new size instead.
+    use x11rb::properties::{WmSizeHints, WmSizeHintsSpecification};
+    let hints = WmSizeHints {
+        position: Some((WmSizeHintsSpecification::ProgramSpecified, x, y)),
+        size: Some((WmSizeHintsSpecification::ProgramSpecified, w, h)),
+        min_size: Some((w, h)),
+        max_size: Some((w, h)),
+        ..WmSizeHints::default()
+    };
+    hints
+        .set_normal_hints(&xc.conn, hwnd.xid())
+        .ctx("WM_NORMAL_HINTS")?;
     let aux = ConfigureWindowAux::new()
         .x(x)
         .y(y)
