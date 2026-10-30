@@ -97,17 +97,27 @@ pub fn reading_align(text: &str) -> Align {
 /// Segmented control; the highlight slides between options on a spring.
 pub fn segmented(ui: &mut Ui, options: &[&str], selected: &mut usize, theme: &Theme) -> Response {
     let font = Theme::font(SIZE_LABEL);
-    let seg_w = options
+    // Each segment fits its own label, so one long option doesn't widen
+    // the rest (and push the control over its row's label).
+    let widths: Vec<f32> = options
         .iter()
         .map(|o| {
             ui.painter()
                 .layout_no_wrap((*o).to_owned(), font.clone(), theme.text)
                 .size()
                 .x
+                + 16.0
         })
-        .fold(0.0_f32, f32::max)
-        + 14.0;
-    let size = vec2(seg_w * options.len() as f32 + 4.0, 24.0);
+        .collect();
+    let lefts: Vec<f32> = widths
+        .iter()
+        .scan(2.0, |x, w| {
+            let left = *x;
+            *x += w;
+            Some(left)
+        })
+        .collect();
+    let size = vec2(widths.iter().sum::<f32>() + 4.0, 24.0);
     let (rect, mut resp) = ui.allocate_exact_size(size, Sense::click());
     let painter = ui.painter();
     let track = if theme.dark {
@@ -120,7 +130,8 @@ pub fn segmented(ui: &mut Ui, options: &[&str], selected: &mut usize, theme: &Th
     if resp.clicked()
         && let Some(p) = resp.interact_pointer_pos()
     {
-        let i = (((p.x - rect.min.x - 2.0) / seg_w).floor() as usize).min(options.len() - 1);
+        let x = p.x - rect.min.x;
+        let i = lefts.iter().rposition(|l| *l <= x).unwrap_or(0);
         if i != *selected {
             *selected = i;
             resp.mark_changed();
@@ -132,9 +143,17 @@ pub fn segmented(ui: &mut Ui, options: &[&str], selected: &mut usize, theme: &Th
         *selected as f32,
         SpringParams::critical(520.0),
     );
+    // The highlight slides between segments, resizing as it goes.
+    let last = options.len().saturating_sub(1);
+    let i0 = (pos.floor().max(0.0) as usize).min(last);
+    let i1 = (i0 + 1).min(last);
+    let f = (pos - i0 as f32).clamp(0.0, 1.0);
     let hl = egui::Rect::from_min_size(
-        pos2(rect.min.x + 2.0 + pos * seg_w, rect.min.y + 2.0),
-        vec2(seg_w, size.y - 4.0),
+        pos2(
+            rect.min.x + lefts[i0] + (lefts[i1] - lefts[i0]) * f,
+            rect.min.y + 2.0,
+        ),
+        vec2(widths[i0] + (widths[i1] - widths[i0]) * f, size.y - 4.0),
     );
     let hl_fill = if theme.dark {
         Color32::from_white_alpha(36)
@@ -143,7 +162,7 @@ pub fn segmented(ui: &mut Ui, options: &[&str], selected: &mut usize, theme: &Th
     };
     painter.rect_filled(hl, 10.0, hl_fill);
     for (i, o) in options.iter().enumerate() {
-        let c = pos2(rect.min.x + 2.0 + seg_w * (i as f32 + 0.5), rect.center().y);
+        let c = pos2(rect.min.x + lefts[i] + widths[i] * 0.5, rect.center().y);
         let near = 1.0 - (pos - i as f32).abs().min(1.0);
         let color = mix(theme.text_dim, theme.text, near);
         painter.text(c, Align2::CENTER_CENTER, *o, font.clone(), color);

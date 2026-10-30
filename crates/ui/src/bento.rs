@@ -18,7 +18,9 @@ use crate::module::{Badge, GridTile, Module, ModuleStatus, TileCtx};
 use crate::paint;
 use crate::shell::ContentCtx;
 use crate::spring::SpringParams;
-use crate::theme::{self, SIZE_ICON, SIZE_LABEL, TILE_PADDING, TILE_RADIUS, Theme, with_alpha};
+use crate::theme::{
+    self, SIZE_CAPTION, SIZE_ICON, SIZE_LABEL, TILE_PADDING, TILE_RADIUS, Theme, with_alpha,
+};
 use egui::emath::TSTransform;
 use egui::{Align2, Area, Color32, Id, Order, Rect, Sense, Ui, UiBuilder, Vec2, pos2, vec2};
 
@@ -121,26 +123,25 @@ fn is_compact(tile: &GridTile<'_>) -> bool {
     tile.module.status() == ModuleStatus::Ready && tile.size.area() < tile.module.size_hint().area()
 }
 
-/// Glass tile background: gradient, rim and highlight, with hover glow.
+/// Tile background. Tiles are the content layer under the glass shell, so
+/// they are plain, near-opaque surfaces: a hairline edge, and a slightly
+/// lighter fill on hover as the pointer's feedback.
 fn tile_glass(painter: &egui::Painter, rect: Rect, theme: &Theme, active: bool, lift: f32) {
     let shape = Squircle::new(rect, TILE_RADIUS);
     let outline = shape.outline();
-    if lift > 0.01 {
-        paint::glow(painter, &shape, theme.accent, lift * 0.6);
-    }
     let (top, bottom) = if active {
         theme.active_tile()
     } else {
         (theme.tile_top, theme.tile_bottom)
     };
-    // Hover brightens the top of the gradient a touch.
-    let top = theme::mix(top, with_alpha(theme.text, 0.16), lift * 0.4);
+    let hover = with_alpha(theme.text, if theme.dark { 0.10 } else { 0.05 });
+    let top = theme::mix(top, hover, lift * 0.5);
+    let bottom = theme::mix(bottom, hover, lift * 0.5);
     paint::fill_gradient(painter, &outline, top, bottom);
     painter.add(egui::epaint::PathShape::closed_line(
         outline,
         egui::epaint::PathStroke::new(1.0, theme.tile_rim),
     ));
-    paint::top_highlight(painter, &shape, with_alpha(theme.highlight, 0.5));
 }
 
 fn tile_inner(rect: Rect, size: TileSize) -> Rect {
@@ -789,7 +790,7 @@ fn compact_tile(ui: &mut Ui, inner: Rect, module: &dyn Module, theme: &Theme, ho
                 inner.center() + vec2(0.0, 13.0),
                 Align2::CENTER_CENTER,
                 l,
-                Theme::font(SIZE_LABEL - 2.0),
+                Theme::font(SIZE_CAPTION),
                 theme.text_dim,
             );
         }

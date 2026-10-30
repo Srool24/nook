@@ -11,7 +11,7 @@ use egui::{Align2, Color32, Id, Rect, Sense, Ui, pos2, vec2};
 use nook_platform::perf::{self, CpuTimes, Disk, Memory};
 use nook_platform::shell;
 use nook_ui::module::{Module, TileCtx, TileSize};
-use nook_ui::theme::{SIZE_LABEL, Theme, mix, with_alpha};
+use nook_ui::theme::{SIZE_CAPTION, SIZE_LABEL, Theme, mix, with_alpha};
 use nook_ui::{icons, paint, widgets};
 use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -545,11 +545,7 @@ fn gauge(
         c,
         Align2::CENTER_CENTER,
         label,
-        Theme::font_semibold(if r > 16.0 {
-            SIZE_LABEL
-        } else {
-            SIZE_LABEL - 2.0
-        }),
+        Theme::font_semibold(if r > 16.0 { SIZE_LABEL } else { SIZE_CAPTION }),
         theme.text,
     );
 }
@@ -657,7 +653,7 @@ impl Module for SystemMonitor {
                     pos,
                     align,
                     name,
-                    Theme::font_semibold(SIZE_LABEL - 2.0),
+                    Theme::font_semibold(SIZE_CAPTION),
                     theme.text_dim,
                 );
                 bottom = bottom.max(label.max.y);

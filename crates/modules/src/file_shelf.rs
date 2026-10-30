@@ -19,7 +19,7 @@ use egui::{
 use nook_platform::files::{self, DropResult};
 use nook_platform::{shell, window};
 use nook_ui::module::{Badge, Module, TileCtx, TileSize};
-use nook_ui::theme::{SIZE_ICON, SIZE_LABEL, Theme, with_alpha};
+use nook_ui::theme::{SIZE_CAPTION, SIZE_ICON, SIZE_LABEL, Theme, with_alpha};
 use nook_ui::{anim, icons, paint, widgets};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -412,7 +412,7 @@ impl Module for FileShelf {
                 c,
                 Align2::CENTER_CENTER,
                 count.min(99),
-                Theme::font_semibold(SIZE_LABEL - 2.0),
+                Theme::font_semibold(SIZE_CAPTION),
                 Color32::WHITE,
             );
         }

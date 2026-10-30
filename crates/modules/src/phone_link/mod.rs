@@ -27,7 +27,7 @@ use localsend::{Direction, LocalSend, Peer, State, Transfer};
 use mirror::{Mirror, Status};
 use nook_platform::{Hwnd, clipboard, files, shell, window};
 use nook_ui::module::{Badge, Module, TileCtx, TileSize};
-use nook_ui::theme::{SIZE_BODY, SIZE_ICON, SIZE_LABEL, Theme, mix, with_alpha};
+use nook_ui::theme::{SIZE_BODY, SIZE_CAPTION, SIZE_ICON, SIZE_LABEL, Theme, mix, with_alpha};
 use nook_ui::{anim, icons, paint, widgets};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -2092,7 +2092,7 @@ impl Module for PhoneLink {
                 c,
                 Align2::CENTER_CENTER,
                 count.min(99),
-                Theme::font_semibold(SIZE_LABEL - 2.0),
+                Theme::font_semibold(SIZE_CAPTION),
                 Color32::WHITE,
             );
         }

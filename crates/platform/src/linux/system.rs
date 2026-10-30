@@ -24,9 +24,21 @@ pub fn apps_use_light_theme() -> bool {
         .is_none_or(|s| s != "prefer-dark")
 }
 
-/// There is no system-wide transparency switch on GNOME.
+/// GNOME has no transparency switch; its High Contrast setting
+/// (Settings > Accessibility > Seeing) stands in for one, so the panel goes
+/// opaque with it.
 pub fn transparency_enabled() -> bool {
-    true
+    if let Some(n) = settings::get("org.freedesktop.appearance", "contrast")
+        .as_ref()
+        .and_then(Setting::as_i64)
+    {
+        // 0 no preference, 1 high contrast.
+        return n != 1;
+    }
+    !settings::get("org.gnome.desktop.a11y.interface", "high-contrast")
+        .as_ref()
+        .and_then(Setting::as_bool)
+        .unwrap_or(false)
 }
 
 /// Pixel size of a tray (AppIndicator) icon.

@@ -11,6 +11,10 @@ pub const SPACE: f32 = 8.0;
 pub const TILE_RADIUS: f32 = 16.0;
 pub const TILE_PADDING: f32 = 12.0;
 
+/// Type scale after macOS's text styles: caption 10 (the smallest text
+/// drawn), subheadline 11, body 13. Contrast of the three text colors is
+/// held at 4.5:1 or more against both the tiles and the panel.
+pub const SIZE_CAPTION: f32 = 10.0;
 pub const SIZE_LABEL: f32 = 11.0;
 pub const SIZE_BODY: f32 = 13.0;
 pub const SIZE_BIG: f32 = 28.0;
@@ -124,39 +128,46 @@ impl Theme {
             Self {
                 dark,
                 accent,
-                glass_top: with_alpha(tinted(Color32::from_rgb(34, 34, 40), 0.30), glass_alpha),
-                glass_bottom: with_alpha(tinted(Color32::from_rgb(18, 18, 22), 0.20), glass_alpha),
+                glass_top: with_alpha(tinted(Color32::from_rgb(36, 36, 40), 0.30), glass_alpha),
+                glass_bottom: with_alpha(tinted(Color32::from_rgb(24, 24, 27), 0.20), glass_alpha),
                 rim: Color32::from_rgba_unmultiplied(0, 0, 0, 110),
                 highlight: Color32::from_rgba_unmultiplied(255, 255, 255, 46),
                 noise_alpha: (grain * GRAIN_MAX_DARK).round() as u8,
                 grain_px,
-                tile_top: Color32::from_rgba_unmultiplied(255, 255, 255, 18),
-                tile_bottom: Color32::from_rgba_unmultiplied(255, 255, 255, 8),
-                tile_rim: Color32::from_rgba_unmultiplied(255, 255, 255, 14),
-                text: Color32::from_rgb(242, 242, 245),
-                text_dim: Color32::from_rgb(168, 168, 178),
-                text_faint: Color32::from_rgb(110, 110, 120),
+                // Tiles are content, not glass: a near-opaque raised gray
+                // (#2C2C2E), so text on them keeps its contrast whatever
+                // shows through the panel.
+                tile_top: Color32::from_rgba_unmultiplied(46, 46, 49, 235),
+                tile_bottom: Color32::from_rgba_unmultiplied(42, 42, 45, 235),
+                tile_rim: Color32::from_rgba_unmultiplied(255, 255, 255, 12),
+                // On #2C2C2E: 12.8:1, 6.3:1 and 5.1:1.
+                text: Color32::from_rgb(245, 245, 247),
+                text_dim: Color32::from_rgb(174, 174, 178),
+                text_faint: Color32::from_rgb(156, 156, 161),
                 ..ink.into_theme()
             }
         } else {
             Self {
                 dark,
                 accent,
-                glass_top: with_alpha(tinted(Color32::from_rgb(252, 252, 253), 0.14), glass_alpha),
+                glass_top: with_alpha(tinted(Color32::from_rgb(244, 244, 247), 0.14), glass_alpha),
                 glass_bottom: with_alpha(
-                    tinted(Color32::from_rgb(236, 236, 240), 0.20),
+                    tinted(Color32::from_rgb(230, 230, 235), 0.20),
                     glass_alpha,
                 ),
                 rim: Color32::from_rgba_unmultiplied(0, 0, 0, 40),
                 highlight: Color32::from_rgba_unmultiplied(255, 255, 255, 200),
                 noise_alpha: (grain * GRAIN_MAX_LIGHT).round() as u8,
                 grain_px,
-                tile_top: Color32::from_rgba_unmultiplied(255, 255, 255, 150),
-                tile_bottom: Color32::from_rgba_unmultiplied(255, 255, 255, 90),
-                tile_rim: Color32::from_rgba_unmultiplied(0, 0, 0, 14),
-                text: Color32::from_rgb(24, 24, 28),
-                text_dim: Color32::from_rgb(92, 92, 104),
-                text_faint: Color32::from_rgb(150, 150, 160),
+                // Near-opaque white tiles on the gray glass, as Control
+                // Center draws its modules.
+                tile_top: Color32::from_rgba_unmultiplied(255, 255, 255, 240),
+                tile_bottom: Color32::from_rgba_unmultiplied(252, 252, 253, 240),
+                tile_rim: Color32::from_rgba_unmultiplied(0, 0, 0, 12),
+                // On white: 16.8:1, 7.5:1 and 5.5:1 (4.7:1 on the panel).
+                text: Color32::from_rgb(29, 29, 31),
+                text_dim: Color32::from_rgb(84, 84, 89),
+                text_faint: Color32::from_rgb(104, 104, 109),
                 ..ink.into_theme()
             }
         }
@@ -188,12 +199,22 @@ impl Theme {
     }
 
     /// Accent readable as text/icon color on the current glass.
+    /// Lightened (dark theme) or darkened (light theme) just enough to
+    /// read at 4.5:1 on a tile, whatever color the wallpaper gave.
     pub fn accent_fg(&self) -> Color32 {
-        if self.dark {
-            mix(self.accent, Color32::WHITE, 0.25)
+        let (toward, start) = if self.dark {
+            (Color32::WHITE, 0.25)
         } else {
-            mix(self.accent, Color32::BLACK, 0.15)
+            (Color32::BLACK, 0.15)
+        };
+        let tile = opaque(self.tile_top);
+        let mut t = start;
+        let mut c = mix(self.accent, toward, t);
+        while contrast(c, tile) < 4.5 && t < 1.0 {
+            t += 0.05;
+            c = mix(self.accent, toward, t);
         }
+        c
     }
 
     pub fn font(size: f32) -> FontId {
@@ -249,6 +270,29 @@ impl Ink {
             pill_text_dim: self.pill_text_dim,
         }
     }
+}
+
+/// The color with its alpha dropped.
+fn opaque(c: Color32) -> Color32 {
+    let [r, g, b, _] = c.to_srgba_unmultiplied();
+    Color32::from_rgb(r, g, b)
+}
+
+/// WCAG contrast ratio of two opaque colors, 1..=21.
+pub fn contrast(a: Color32, b: Color32) -> f32 {
+    fn luminance(c: Color32) -> f32 {
+        let lin = |v: u8| {
+            let v = v as f32 / 255.0;
+            if v <= 0.040_45 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * lin(c.r()) + 0.7152 * lin(c.g()) + 0.0722 * lin(c.b())
+    }
+    let (la, lb) = (luminance(a), luminance(b));
+    (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
 }
 
 /// Multiplies a color's alpha (unmultiplied semantics).
@@ -473,5 +517,27 @@ mod tests {
         // The solid material ignores the opacity setting.
         let t = Theme::styled(true, FALLBACK_ACCENT, false, &clear);
         assert_eq!(t.glass_top.to_srgba_unmultiplied()[3], 245);
+    }
+
+    #[test]
+    fn text_colors_meet_contrast_on_tiles() {
+        for dark in [true, false] {
+            let t = Theme::new(dark, FALLBACK_ACCENT, false);
+            let tile = opaque(t.tile_top);
+            for c in [t.text, t.text_dim, t.text_faint] {
+                assert!(contrast(c, tile) >= 4.5, "dark={dark} {c:?}");
+            }
+            for accent in [
+                FALLBACK_ACCENT,
+                Color32::from_rgb(255, 214, 10),
+                Color32::from_rgb(20, 20, 120),
+            ] {
+                let t = Theme::new(dark, accent, false);
+                assert!(
+                    contrast(t.accent_fg(), tile) >= 4.5,
+                    "dark={dark} {accent:?}"
+                );
+            }
+        }
     }
 }
