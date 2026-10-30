@@ -281,10 +281,18 @@ mod linux {
             ));
         }
         .map_err(|e| PlatformError::other("starting the recorder", e))?;
-        let mut out = child
+        let out = child
             .stdout
             .take()
             .ok_or_else(|| PlatformError::Other("recorder has no output".into()))?;
+        let (mut out, big_endian) = match pcm_stream(out) {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e);
+            }
+        };
         let mut bytes = vec![0u8; CHUNK * 2];
         let mut samples = Vec::with_capacity(CHUNK);
         let mut got_any = false;
@@ -296,13 +304,13 @@ mod linux {
                 Ok(()) => {
                     got_any = true;
                     samples.clear();
-                    samples.extend(
-                        bytes
-                            .as_chunks::<2>()
-                            .0
-                            .iter()
-                            .map(|b| i16::from_le_bytes(*b)),
-                    );
+                    samples.extend(bytes.as_chunks::<2>().0.iter().map(|b| {
+                        if big_endian {
+                            i16::from_be_bytes(*b)
+                        } else {
+                            i16::from_le_bytes(*b)
+                        }
+                    }));
                     on_chunk(&samples);
                 }
                 Err(e) => {
@@ -317,6 +325,54 @@ mod linux {
         let _ = child.kill();
         let _ = child.wait();
         result
+    }
+
+    /// The 16-bit samples in a recorder's output, past any container
+    /// header, and whether they are big-endian. `pw-record` writes an AU
+    /// stream (big-endian) to stdout; `parec --raw` writes bare
+    /// little-endian samples. Reading AU samples as little-endian turned
+    /// every memo into white noise.
+    fn pcm_stream(mut out: impl Read + 'static) -> Result<(Box<dyn Read>, bool)> {
+        let read = |out: &mut dyn Read, buf: &mut [u8]| {
+            out.read_exact(buf)
+                .map_err(|e| PlatformError::other("no microphone input", e))
+        };
+        let mut magic = [0u8; 4];
+        read(&mut out, &mut magic)?;
+        match &magic {
+            b".snd" => {
+                let mut head = [0u8; 20];
+                read(&mut out, &mut head)?;
+                let word =
+                    |i: usize| u32::from_be_bytes([head[i], head[i + 1], head[i + 2], head[i + 3]]);
+                let (offset, encoding) = (word(0) as usize, word(8));
+                // Encoding 3 is 16-bit linear PCM.
+                if encoding != 3 || offset < 24 {
+                    return Err(PlatformError::Other(format!(
+                        "recorder sent AU encoding {encoding}, not 16-bit PCM"
+                    )));
+                }
+                let mut rest = vec![0u8; offset - 24];
+                read(&mut out, &mut rest)?;
+                Ok((Box::new(out), true))
+            }
+            b"RIFF" => {
+                // "WAVE", then chunks up to "data" (its size is unknown on a pipe).
+                let mut skip = [0u8; 8];
+                read(&mut out, &mut skip)?;
+                loop {
+                    let mut chunk = [0u8; 8];
+                    read(&mut out, &mut chunk)?;
+                    if &chunk[0..4] == b"data" {
+                        break Ok((Box::new(out), false));
+                    }
+                    let size = u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
+                    let mut body = vec![0u8; size as usize + (size as usize & 1)];
+                    read(&mut out, &mut body)?;
+                }
+            }
+            _ => Ok((Box::new(std::io::Cursor::new(magic).chain(out)), false)),
+        }
     }
 
     static PLAYER: Mutex<Option<Child>> = Mutex::new(None);
@@ -344,6 +400,56 @@ mod linux {
         if let Some(mut child) = PLAYER.lock().unwrap_or_else(|e| e.into_inner()).take() {
             let _ = child.kill();
             let _ = child.wait();
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::pcm_stream;
+        use std::io::Read;
+
+        fn samples(bytes: Vec<u8>) -> Vec<i16> {
+            let (mut r, be) = pcm_stream(std::io::Cursor::new(bytes)).unwrap();
+            let mut pcm = Vec::new();
+            r.read_to_end(&mut pcm).unwrap();
+            pcm.as_chunks::<2>()
+                .0
+                .iter()
+                .map(|b| {
+                    if be {
+                        i16::from_be_bytes(*b)
+                    } else {
+                        i16::from_le_bytes(*b)
+                    }
+                })
+                .collect()
+        }
+
+        #[test]
+        fn reads_au_from_pw_record() {
+            // What pw-record writes to stdout: an AU header (here with 8
+            // bytes of annotation) and big-endian 16-bit samples.
+            let mut au = b".snd".to_vec();
+            for word in [32u32, u32::MAX, 3, 44_100, 1] {
+                au.extend(word.to_be_bytes());
+            }
+            au.extend([0u8; 8]);
+            for s in [1000i16, -2, 300] {
+                au.extend(s.to_be_bytes());
+            }
+            assert_eq!(samples(au), [1000, -2, 300]);
+        }
+
+        #[test]
+        fn reads_wav_and_raw() {
+            let mut wav = b"RIFF\xff\xff\xff\xffWAVEfmt ".to_vec();
+            wav.extend(16u32.to_le_bytes());
+            wav.extend([0u8; 16]);
+            wav.extend(b"data\xff\xff\xff\xff");
+            wav.extend(7i16.to_le_bytes());
+            assert_eq!(samples(wav), [7]);
+            let raw: Vec<u8> = [5i16, -6, 7].iter().flat_map(|s| s.to_le_bytes()).collect();
+            assert_eq!(samples(raw), [5, -6, 7]);
         }
     }
 }
