@@ -929,6 +929,11 @@ pub struct Glyph {
     /// cursor before this char sits at its right edge.
     #[cfg_attr(feature = "serde", serde(default))]
     pub(crate) rtl: bool,
+
+    /// Drawn as its mirror image (a `(` drawn as `)`), as right-to-left
+    /// text wants.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub(crate) mirrored: bool,
 }
 
 impl Glyph {

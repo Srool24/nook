@@ -143,19 +143,22 @@ pub fn layout(fonts: &mut FontsImpl, pixels_per_point: f32, job: Arc<LayoutJob>)
     let intrinsic_size = calculate_intrinsic_size(point_scale, &job, &paragraphs);
 
     let mut elided = false;
-    let mut directions = Vec::new();
+    let mut row_bidi = Vec::new();
     let mut rows = rows_from_paragraphs(
         paragraphs,
         &job,
         pixels_per_point,
         &mut elided,
-        &mut directions,
+        &mut row_bidi,
     );
     if elided && let Some(last_placed) = rows.last_mut() {
         let last_row = Arc::make_mut(&mut last_placed.row);
         replace_last_glyph_with_overflow_character(fonts, pixels_per_point, &job, last_row);
         if let Some(last) = last_row.glyphs.last() {
             last_row.size.x = last.max_x();
+        }
+        if let Some(Some(bidi)) = row_bidi.get_mut(rows.len() - 1) {
+            bidi.elide(rows[rows.len() - 1].row.glyphs.len());
         }
     }
 
@@ -179,9 +182,11 @@ pub fn layout(fonts: &mut FontsImpl, pixels_per_point: f32, job: Arc<LayoutJob>)
 
     // Rows are measured, wrapped, elided and aligned in logical order; then
     // rows with right-to-left text are put in visual order, in the same span.
-    for (placed_row, base_rtl) in rows.iter_mut().zip(directions) {
-        if let Some(base_rtl) = base_rtl {
-            bidi::reorder_row(Arc::make_mut(&mut placed_row.row), base_rtl);
+    for (placed_row, bidi) in rows.iter_mut().zip(row_bidi) {
+        if let Some(bidi) = bidi {
+            let row = Arc::make_mut(&mut placed_row.row);
+            bidi.reorder(row);
+            mirror_glyphs(fonts, pixels_per_point, &job, row);
         }
     }
 
@@ -199,6 +204,9 @@ struct ShapingContext {
     font_metrics: StyledMetrics,
     is_first_glyph_in_section: bool,
     prev_cluster: Option<u32>,
+    /// The current run was shaped right to left, so the shaper drew
+    /// mirrored glyphs for brackets and the like.
+    run_mirrored: bool,
 }
 
 impl ShapingContext {
@@ -223,6 +231,7 @@ impl ShapingContext {
             section_index: self.section_index,
             first_vertex: 0,
             rtl: false,
+            mirrored: self.run_mirrored,
         }
     }
 }
@@ -268,7 +277,7 @@ fn layout_shaped_run(
     // code expects) and are laid out as if left to right; the bidi pass
     // in `rows_from_paragraphs` puts them in visual order per row.
     let infos = glyph_buffer.glyph_infos();
-    let rtl = infos.len() > 1 && infos[0].cluster > infos[infos.len() - 1].cluster;
+    let rtl = ctx.run_mirrored;
     let shaped = iter::zip(infos, glyph_buffer.glyph_positions());
     let shaped: Box<dyn Iterator<Item = _>> = if rtl {
         Box::new(shaped.rev())
@@ -493,6 +502,7 @@ fn layout_section(
         font_metrics,
         is_first_glyph_in_section: paragraph.glyphs.is_empty(),
         prev_cluster: None,
+        run_mirrored: false,
     };
     let mut runs = Vec::new();
 
@@ -529,7 +539,9 @@ fn layout_section(
                 flags |= harfrust::BufferFlags::END_OF_TEXT;
             }
 
-            let glyph_buffer = shape_text(font_face, run_text, &format.coords, shape_buffer, flags);
+            let (glyph_buffer, rtl) =
+                shape_text(font_face, run_text, &format.coords, shape_buffer, flags);
+            ctx.run_mirrored = rtl;
 
             layout_shaped_run(
                 font,
@@ -610,14 +622,14 @@ fn calculate_intrinsic_size(
 }
 
 // Ignores the Y coordinate.
-/// Also pushes each row's bidi direction to `directions` (see
-/// [`bidi::paragraph_direction`]).
+/// Also pushes each row's bidi levels to `row_bidi` (see
+/// [`bidi::RowBidi`]).
 fn rows_from_paragraphs(
     paragraphs: Vec<Paragraph>,
     job: &LayoutJob,
     pixels_per_point: f32,
     elided: &mut bool,
-    directions: &mut Vec<Option<bool>>,
+    row_bidi: &mut Vec<Option<bidi::RowBidi>>,
 ) -> Vec<PlacedRow> {
     let num_paragraphs = paragraphs.len();
 
@@ -631,7 +643,7 @@ fn rows_from_paragraphs(
 
         let is_last_paragraph = (i + 1) == num_paragraphs;
         let first_row = rows.len();
-        let base_rtl = bidi::paragraph_direction(&paragraph.glyphs);
+        let levels = bidi::ParagraphLevels::new(&paragraph.glyphs);
 
         if paragraph.glyphs.is_empty() {
             rows.push(PlacedRow {
@@ -668,7 +680,13 @@ fn rows_from_paragraphs(
             }
         }
 
-        directions.resize(rows.len().max(first_row), base_rtl);
+        row_bidi.resize(first_row, None);
+        let mut start = 0;
+        for placed_row in &rows[first_row..] {
+            let end = start + placed_row.row.glyphs.len();
+            row_bidi.push(levels.as_ref().map(|l| l.row(start..end)));
+            start = end;
+        }
     }
 
     rows
@@ -679,65 +697,195 @@ fn rows_from_paragraphs(
 mod bidi {
     use super::Glyph;
     use crate::text::Row;
-    use unicode_bidi::{BidiClass, BidiInfo, Level, bidi_class};
+    use unicode_bidi::{BidiClass, BidiInfo, Level};
 
-    /// `None` when the paragraph has nothing right-to-left (no work to do),
-    /// else whether its base direction is right-to-left: that of its first
-    /// strong char.
-    pub(super) fn paragraph_direction(glyphs: &[Glyph]) -> Option<bool> {
-        let is_rtl = |c: char| {
-            matches!(
-                bidi_class(c),
-                BidiClass::R | BidiClass::AL | BidiClass::RLE | BidiClass::RLO | BidiClass::RLI
-            )
-        };
-        if !glyphs.iter().any(|g| is_rtl(g.chr)) {
-            return None;
-        }
-        let first_strong = glyphs.iter().find_map(|g| match bidi_class(g.chr) {
-            BidiClass::L => Some(false),
-            BidiClass::R | BidiClass::AL => Some(true),
-            _ => None,
-        });
-        Some(first_strong.unwrap_or(false))
+    /// Embedding levels of a paragraph's chars, resolved over the whole
+    /// paragraph, as UAX #9 wants, before it is broken into rows: a number
+    /// that wraps to the next row still sits by the Hebrew it follows.
+    pub(super) struct ParagraphLevels {
+        base: Level,
+        levels: Vec<Level>,
+        classes: Vec<BidiClass>,
     }
 
-    /// Lays the row's glyphs out in visual order, each keeping the room it
-    /// had (advance, letter spacing, kerning), starting where the row did.
-    pub(super) fn reorder_row(row: &mut Row, base_rtl: bool) {
-        let n = row.glyphs.len();
-        if n == 0 {
-            return;
-        }
-        let text: String = row.glyphs.iter().map(|g| g.chr).collect();
-        let level = if base_rtl { Level::rtl() } else { Level::ltr() };
-        let info = BidiInfo::new(&text, Some(level));
-        let mut levels = Vec::with_capacity(n);
-        for para in &info.paragraphs {
-            let by_byte = info.reordered_levels(para, para.range.clone());
-            levels.extend(
-                text[para.range.clone()]
-                    .char_indices()
-                    .map(|(b, _)| by_byte[para.range.start + b]),
-            );
-        }
-        if levels.len() != n {
-            return;
-        }
-        let start = row.glyphs[0].pos.x;
-        let widths: Vec<f32> = (0..n)
-            .map(|i| match row.glyphs.get(i + 1) {
-                Some(next) => next.pos.x - row.glyphs[i].pos.x,
-                None => row.glyphs[i].advance_width,
+    impl ParagraphLevels {
+        /// `None` when the paragraph has nothing right-to-left (no work to
+        /// do). Its direction is that of its first strong char.
+        pub(super) fn new(glyphs: &[Glyph]) -> Option<Self> {
+            let text: String = glyphs.iter().map(|g| g.chr).collect();
+            let info = BidiInfo::new(&text, None);
+            if !info.has_rtl() {
+                return None;
+            }
+            let base = info.paragraphs.first().map_or(Level::ltr(), |p| p.level);
+            let (levels, classes) = text
+                .char_indices()
+                .map(|(b, _)| (info.levels[b], info.original_classes[b]))
+                .unzip();
+            Some(Self {
+                base,
+                levels,
+                classes,
             })
-            .collect();
-        let mut x = start;
-        for i in BidiInfo::reorder_visual(&levels) {
-            let glyph = &mut row.glyphs[i];
-            glyph.pos.x = x;
-            glyph.rtl = levels[i].is_rtl();
-            x += widths[i];
         }
+
+        /// The levels of the row holding the paragraph's chars `range`.
+        pub(super) fn row(&self, range: std::ops::Range<usize>) -> RowBidi {
+            RowBidi {
+                base: self.base,
+                levels: self.levels.get(range.clone()).unwrap_or_default().to_vec(),
+                classes: self.classes.get(range).unwrap_or_default().to_vec(),
+            }
+        }
+    }
+
+    /// One row's share of [`ParagraphLevels`], one entry per glyph.
+    #[derive(Clone)]
+    pub(super) struct RowBidi {
+        base: Level,
+        levels: Vec<Level>,
+        classes: Vec<BidiClass>,
+    }
+
+    impl RowBidi {
+        /// The row lost glyphs at its end and gained an overflow char,
+        /// which, ending the row, takes the paragraph's direction.
+        pub(super) fn elide(&mut self, glyph_count: usize) {
+            let kept = glyph_count.saturating_sub(1);
+            self.levels.truncate(kept);
+            self.classes.truncate(kept);
+            self.levels.push(self.base);
+            self.classes.push(BidiClass::ON);
+        }
+
+        /// Lays the row's glyphs out in visual order, each keeping the
+        /// room it had (advance, letter spacing, kerning), starting where
+        /// the row did.
+        pub(super) fn reorder(mut self, row: &mut Row) {
+            let n = row.glyphs.len();
+            if n == 0 || self.levels.len() != n {
+                return;
+            }
+            // L1: whitespace ending the row, or before a tab, goes back to
+            // the paragraph's level.
+            let mut trailing = true;
+            for i in (0..n).rev() {
+                match self.classes[i] {
+                    BidiClass::S | BidiClass::B => {
+                        self.levels[i] = self.base;
+                        trailing = true;
+                    }
+                    BidiClass::WS
+                    | BidiClass::FSI
+                    | BidiClass::LRI
+                    | BidiClass::RLI
+                    | BidiClass::PDI
+                        if trailing =>
+                    {
+                        self.levels[i] = self.base;
+                    }
+                    _ => trailing = false,
+                }
+            }
+            let start = row.glyphs[0].pos.x;
+            let widths: Vec<f32> = (0..n)
+                .map(|i| match row.glyphs.get(i + 1) {
+                    Some(next) => next.pos.x - row.glyphs[i].pos.x,
+                    None => row.glyphs[i].advance_width,
+                })
+                .collect();
+            let mut x = start;
+            for i in BidiInfo::reorder_visual(&self.levels) {
+                let glyph = &mut row.glyphs[i];
+                glyph.pos.x = x;
+                glyph.rtl = self.levels[i].is_rtl();
+                x += widths[i];
+            }
+        }
+    }
+
+    /// The char drawn in place of `c` in right-to-left text (rule L4), for
+    /// the common Bidi_Mirrored pairs.
+    pub(super) fn mirror(c: char) -> Option<char> {
+        const PAIRS: &[(char, char)] = &[
+            ('(', ')'),
+            ('<', '>'),
+            ('[', ']'),
+            ('{', '}'),
+            ('«', '»'),
+            ('‹', '›'),
+            ('⁅', '⁆'),
+            ('⁽', '⁾'),
+            ('₍', '₎'),
+            ('≤', '≥'),
+            ('≪', '≫'),
+            ('⟨', '⟩'),
+            ('⟦', '⟧'),
+            ('⟪', '⟫'),
+            ('〈', '〉'),
+            ('《', '》'),
+            ('「', '」'),
+            ('『', '』'),
+            ('【', '】'),
+            ('〔', '〕'),
+        ];
+        PAIRS.iter().find_map(|&(a, b)| {
+            if c == a {
+                Some(b)
+            } else if c == b {
+                Some(a)
+            } else {
+                None
+            }
+        })
+    }
+}
+
+/// Draws brackets and the like in right-to-left text mirrored, and those
+/// the shaper mirrored in left-to-right text (inside a right-to-left run)
+/// as they are. Positions and advances stay.
+fn mirror_glyphs(fonts: &mut FontsImpl, pixels_per_point: f32, job: &LayoutJob, row: &mut Row) {
+    for glyph in &mut row.glyphs {
+        let Some(mirrored) = bidi::mirror(glyph.chr) else {
+            continue;
+        };
+        if glyph.rtl == glyph.mirrored {
+            continue;
+        }
+        let shown = if glyph.rtl { mirrored } else { glyph.chr };
+        let Some(section) = job.sections.get(glyph.section_index as usize) else {
+            continue;
+        };
+        let mut font = fonts.font(&section.format.font_id.family);
+        let face_key = font.resolve_face(shown);
+        let metrics = font
+            .fonts_by_id
+            .get(&face_key)
+            .map(|f| {
+                f.styled_metrics(
+                    pixels_per_point,
+                    section.format.font_id.size,
+                    &section.format.coords,
+                )
+            })
+            .unwrap_or_default();
+        let (_, info) = font.glyph_info(shown, &metrics);
+        let Some(face) = font.fonts_by_id.get_mut(&face_key) else {
+            continue;
+        };
+        let (alloc, _) = face.allocate_glyph(
+            font.atlas,
+            &metrics,
+            &ShapedGlyph {
+                glyph_id: info.id.unwrap_or(skrifa::GlyphId::NOTDEF),
+                h_pos: glyph.pos.x * pixels_per_point,
+                is_cjk: is_cjk(shown),
+            },
+        );
+        glyph.uv_rect = alloc.uv_rect;
+        glyph.font_face_height = metrics.row_height;
+        glyph.font_face_ascent = metrics.ascent;
+        glyph.mirrored = glyph.rtl;
     }
 }
 
@@ -939,6 +1087,7 @@ fn replace_last_glyph_with_overflow_character(
                 section_index,
                 first_vertex: 0,
                 rtl: false, // filled in later
+                mirrored: false,
             });
             return;
         }
@@ -1506,7 +1655,7 @@ fn shape_text(
     coords: &VariationCoords,
     mut buffer: harfrust::UnicodeBuffer,
     flags: harfrust::BufferFlags,
-) -> harfrust::GlyphBuffer {
+) -> (harfrust::GlyphBuffer, bool) {
     let font_ref = font_face.skrifa_font_ref();
     let tweak = font_face.tweak();
 
@@ -1532,8 +1681,9 @@ fn shape_text(
     buffer.set_flags(flags);
     buffer.push_str(text);
     buffer.guess_segment_properties();
+    let rtl = buffer.direction() == harfrust::Direction::RightToLeft;
 
-    shaper.shape(buffer, harfrust::ShapeOptions::new())
+    (shaper.shape(buffer, harfrust::ShapeOptions::new()), rtl)
 }
 
 // ----------------------------------------------------------------------------
@@ -1674,7 +1824,11 @@ mod tests {
         assert!(galley.elided);
         assert_eq!(row.text().chars().last(), Some('…'));
         // The ellipsis ends the right-to-left text: on the left.
-        let min_x = row.glyphs.iter().map(|g| g.pos.x).fold(f32::INFINITY, f32::min);
+        let min_x = row
+            .glyphs
+            .iter()
+            .map(|g| g.pos.x)
+            .fold(f32::INFINITY, f32::min);
         assert_eq!(x_of(row, '…'), min_x);
         assert!(x_of(row, 'ש') > x_of(row, 'ל'));
     }
@@ -1687,10 +1841,21 @@ mod tests {
             job.halign = halign;
             let galley = layout(&mut fonts, 1.0, job.into());
             let row = &galley.rows[0].row;
-            let min_x = row.glyphs.iter().map(|g| g.pos.x).fold(f32::INFINITY, f32::min);
-            let max_x = row.glyphs.iter().map(|g| g.max_x()).fold(f32::NEG_INFINITY, f32::max);
+            let min_x = row
+                .glyphs
+                .iter()
+                .map(|g| g.pos.x)
+                .fold(f32::INFINITY, f32::min);
+            let max_x = row
+                .glyphs
+                .iter()
+                .map(|g| g.max_x())
+                .fold(f32::NEG_INFINITY, f32::max);
             assert!(min_x.abs() < 1.0, "{halign:?}: starts at {min_x}");
-            assert!((max_x - row.size.x).abs() < 1.0, "{halign:?}: ends at {max_x}");
+            assert!(
+                (max_x - row.size.x).abs() < 1.0,
+                "{halign:?}: ends at {max_x}"
+            );
         }
     }
 
@@ -1724,17 +1889,56 @@ mod tests {
     }
 
     #[test]
+    fn test_bidi_levels_span_wrapped_rows() {
+        let mut fonts = FontsImpl::new(TextOptions::default(), FontDefinitions::default());
+        let mut job = LayoutJob::single_section("abc שלום 123 עולם".into(), TextFormat::default());
+        job.wrap.max_width = 100.0;
+        let galley = layout(&mut fonts, 1.0, job.into());
+        let row = galley
+            .rows
+            .iter()
+            .map(|r| &r.row)
+            .find(|r| r.glyphs.iter().any(|g| g.chr == '1'))
+            .unwrap();
+        assert!(row.glyphs.iter().any(|g| g.chr == 'ע'), "{:?}", row.text());
+        // The number follows Hebrew (on the row before), so it is part of
+        // the right-to-left run: to the right of the next word.
+        assert!(x_of(row, '1') > x_of(row, 'ע'), "{:?}", row.text());
+        assert!(x_of(row, '1') < x_of(row, '3'));
+    }
+
+    #[test]
+    fn test_bidi_brackets_mirror_in_rtl_text() {
+        let mut fonts = FontsImpl::new(TextOptions::default(), FontDefinitions::default());
+        let galley = bidi_galley("שלום (עולם) abc", &mut fonts);
+        let row = &galley.rows[0].row;
+        let paren = |c: char| row.glyphs.iter().find(|g| g.chr == c).unwrap();
+        assert!(paren('(').rtl && paren('(').mirrored);
+        assert!(paren(')').mirrored);
+        // The opening bracket, drawn as `)`, is on the right of the word.
+        assert!(x_of(row, '(') > x_of(row, 'ע'));
+        let latin = bidi_galley("שלום (abc)", &mut fonts);
+        let row = &latin.rows[0].row;
+        let paren = row.glyphs.iter().find(|g| g.chr == '(').unwrap();
+        assert!(paren.rtl == paren.mirrored);
+    }
+
+    #[test]
     fn test_bidi_shaped_rtl_run_keeps_one_glyph_per_char() {
         // Needs a face with Hebrew so the run goes through RTL shaping.
-        let Some(bytes) = ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf"]
-            .iter()
-            .find_map(|p| std::fs::read(p).ok())
-        else {
+        let Some(bytes) = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+        ]
+        .iter()
+        .find_map(|p| std::fs::read(p).ok()) else {
             return;
         };
         let mut defs = FontDefinitions::default();
-        defs.font_data
-            .insert("dejavu".into(), std::sync::Arc::new(FontData::from_owned(bytes)));
+        defs.font_data.insert(
+            "dejavu".into(),
+            std::sync::Arc::new(FontData::from_owned(bytes)),
+        );
         defs.families
             .get_mut(&FontFamily::Proportional)
             .unwrap()
