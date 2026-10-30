@@ -240,6 +240,12 @@ impl X {
         ))
     }
 
+    /// Size of the root window (the whole X screen) in pixels.
+    pub fn root_size(&self) -> (i32, i32) {
+        let s = &x11rb::connection::Connection::setup(&self.conn).roots[self.screen];
+        (s.width_in_pixels.into(), s.height_in_pixels.into())
+    }
+
     /// The X server's DPI setting (`Xft.dpi`), which GNOME sets from the
     /// display scale; 96 when unset.
     pub fn xft_dpi(&self) -> u32 {

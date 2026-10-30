@@ -50,6 +50,16 @@ impl Rect {
         (r.right > r.left && r.bottom > r.top).then_some(r)
     }
 
+    fn scaled(&self, k: f32) -> Rect {
+        let m = |v: i32| (v as f32 * k).round() as i32;
+        Rect {
+            left: m(self.left),
+            top: m(self.top),
+            right: m(self.right),
+            bottom: m(self.bottom),
+        }
+    }
+
     fn from_xywh(x: i32, y: i32, w: i32, h: i32) -> Rect {
         Rect {
             left: x,
@@ -125,19 +135,55 @@ pub fn all() -> Vec<Monitor> {
         }
     }
     let mut monitors: Vec<(bool, Monitor)> = list;
-    apply_work_areas(x, &mut monitors);
+    let root = x.root_size();
+    let mut bounds: Vec<Rect> = monitors.iter().map(|(_, m)| m.bounds).collect();
+    to_root_units(&mut bounds, root, dpi as f32 / 96.0);
+    for ((_, m), b) in monitors.iter_mut().zip(bounds) {
+        m.bounds = b;
+        m.work = b;
+    }
+    apply_work_areas(x, &mut monitors, root, dpi as f32 / 96.0);
     monitors.sort_by_key(|(primary, m)| (!primary, m.bounds.left, m.bounds.top));
     monitors.into_iter().map(|(_, m)| m).collect()
 }
 
-fn apply_work_areas(x: &crate::sys::x11::X, monitors: &mut [(bool, Monitor)]) {
+/// Geometry Mutter reports in logical pixels while the X screen is in
+/// physical ones (XWayland scaled natively, the display at 200%), made
+/// physical: rects that span the root only once multiplied by the scale
+/// `k` are multiplied by it. Without this Nook covered the top-left part
+/// of the screen only.
+fn to_root_units(rects: &mut [Rect], (root_w, root_h): (i32, i32), k: f32) {
+    if k <= 1.01 || rects.is_empty() {
+        return;
+    }
+    let right = rects.iter().map(|r| r.right).max().unwrap_or(0) as f32;
+    let bottom = rects.iter().map(|r| r.bottom).max().unwrap_or(0) as f32;
+    let (w, h) = (root_w as f32, root_h as f32);
+    let short = right < w * 0.9 && bottom < h * 0.9;
+    let fits = (right * k - w).abs() <= w * 0.03 && (bottom * k - h).abs() <= h * 0.1;
+    if short && fits {
+        static LOGGED: std::sync::Once = std::sync::Once::new();
+        LOGGED.call_once(|| tracing::info!("monitor geometry in logical pixels, scaling by {k}"));
+        for r in rects.iter_mut() {
+            *r = r.scaled(k);
+        }
+    }
+}
+
+fn apply_work_areas(
+    x: &crate::sys::x11::X,
+    monitors: &mut [(bool, Monitor)],
+    root: (i32, i32),
+    k: f32,
+) {
     let per_monitor = x.prop32(x.root, x.atoms._GTK_WORKAREAS_D0);
-    let areas: Vec<Rect> = per_monitor
+    let mut areas: Vec<Rect> = per_monitor
         .as_chunks::<4>()
         .0
         .iter()
         .map(|c| Rect::from_xywh(c[0] as i32, c[1] as i32, c[2] as i32, c[3] as i32))
         .collect();
+    to_root_units(&mut areas, root, k);
     if !areas.is_empty() {
         for (_, m) in monitors.iter_mut() {
             if let Some(a) = areas.iter().find(|a| {
@@ -152,7 +198,9 @@ fn apply_work_areas(x: &crate::sys::x11::X, monitors: &mut [(bool, Monitor)]) {
     }
     let desktop = x.prop32(x.root, x.atoms._NET_WORKAREA);
     if let &[wx, wy, ww, wh, ..] = desktop.as_slice() {
-        let area = Rect::from_xywh(wx as i32, wy as i32, ww as i32, wh as i32);
+        let mut area = [Rect::from_xywh(wx as i32, wy as i32, ww as i32, wh as i32)];
+        to_root_units(&mut area, root, k);
+        let [area] = area;
         for (_, m) in monitors.iter_mut() {
             if let Some(w) = area.intersect(&m.bounds) {
                 m.work = w;
@@ -237,6 +285,30 @@ mod tests {
         let u = union([a, b].into_iter()).expect("two rects");
         assert_eq!((u.left, u.top, u.right, u.bottom), (-1600, 0, 1920, 1100));
         assert!(union(std::iter::empty()).is_none());
+    }
+
+    #[test]
+    fn scales_logical_geometry_to_the_root() {
+        // 200% under natively scaled XWayland: the top bar's work area in
+        // logical pixels on a 2880 x 1800 screen.
+        let mut work = [Rect::from_xywh(0, 32, 1440, 868)];
+        to_root_units(&mut work, (2880, 1800), 2.0);
+        assert_eq!(work[0], Rect::from_xywh(0, 64, 2880, 1736));
+        // Already physical: left alone.
+        let mut work = [Rect::from_xywh(0, 64, 2880, 1736)];
+        to_root_units(&mut work, (2880, 1800), 2.0);
+        assert_eq!(work[0], Rect::from_xywh(0, 64, 2880, 1736));
+        // Two side-by-side monitors in physical pixels: left alone.
+        let mut both = [
+            Rect::from_xywh(0, 0, 1920, 1080),
+            Rect::from_xywh(1920, 0, 1920, 1080),
+        ];
+        to_root_units(&mut both, (3840, 1080), 2.0);
+        assert_eq!(both[1], Rect::from_xywh(1920, 0, 1920, 1080));
+        // No scaling: left alone.
+        let mut work = [Rect::from_xywh(0, 32, 1440, 868)];
+        to_root_units(&mut work, (2880, 1800), 1.0);
+        assert_eq!(work[0], Rect::from_xywh(0, 32, 1440, 868));
     }
 
     #[test]
