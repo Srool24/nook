@@ -157,7 +157,23 @@ pub fn page(
     if alpha <= 0.002 {
         return out;
     }
-    let panel = cctx.panel.shrink(PANEL_PADDING);
+    // The page scrolls when the monitor has no room for all of it (a
+    // laptop at 200% with a section open).
+    let view = cctx.panel.shrink(PANEL_PADDING);
+    let body = open_section(&ctx).map_or(0.0, |i| BODY[i]);
+    let overflow = (BASE - 2.0 * PANEL_PADDING + body - view.height()).max(0.0);
+    let scroll_id = Id::new("nook-settings-scroll");
+    let mut scroll: f32 = ctx.data(|d| d.get_temp(scroll_id)).unwrap_or(0.0);
+    if overflow > 0.0
+        && ctx
+            .input(|i| i.pointer.hover_pos())
+            .is_some_and(|p| view.contains(p))
+    {
+        scroll -= ctx.input(|i| i.smooth_scroll_delta.y);
+    }
+    let scroll = scroll.clamp(0.0, overflow);
+    ctx.data_mut(|d| d.insert_temp(scroll_id, scroll));
+    let panel = view.translate(vec2(0.0, -scroll));
     let area = Area::new(Id::new("nook-settings"))
         .order(Order::Middle)
         .fixed_pos(panel.min)
@@ -166,7 +182,11 @@ pub fn page(
         .sense(Sense::hover())
         .show(&ctx, |ui| {
             ui.multiply_opacity(alpha);
-            ui.set_min_size(panel.size());
+            ui.set_min_size(view.size());
+            if overflow > 0.0 {
+                ui.set_clip_rect(view.expand2(vec2(PANEL_PADDING, 2.0)));
+                scrollbar(ui, view, scroll, overflow, theme);
+            }
 
             // Header: back button + title.
             let header = Rect::from_min_size(panel.min, vec2(panel.width(), 28.0));
@@ -362,6 +382,18 @@ pub fn page(
         cctx.transform * egui::emath::TSTransform::from_translation(vec2(0.0, slide)),
     );
     out
+}
+
+/// A thin thumb along the right padding showing where the page is scrolled.
+fn scrollbar(ui: &Ui, view: Rect, scroll: f32, overflow: f32, theme: &Theme) {
+    let total = view.height() + overflow;
+    let len = (view.height() * view.height() / total).max(24.0);
+    let top = view.min.y + (view.height() - len) * (scroll / overflow);
+    let x = view.max.x + PANEL_PADDING * 0.5;
+    ui.painter().line_segment(
+        [pos2(x, top + 2.0), pos2(x, top + len - 2.0)],
+        Stroke::new(3.0, with_alpha(theme.text_faint, 0.5)),
+    );
 }
 
 /// Right end of the header: the running version and either the Update
