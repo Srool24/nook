@@ -308,6 +308,23 @@ pub fn install_fonts(ctx: &egui::Context) {
         fonts.font_data.insert("segoe-semibold".into(), data.into());
         semibold_family.insert(0, "segoe-semibold".into());
     }
+    #[cfg(not(windows))]
+    for (i, (regular, semibold)) in script_fallbacks().into_iter().enumerate() {
+        let name = format!("script-{i}");
+        fonts.font_data.insert(name.clone(), regular.into());
+        if let Some(list) = fonts.families.get_mut(&FontFamily::Proportional) {
+            list.push(name.clone());
+        }
+        let bold = match semibold {
+            Some(data) => {
+                let bold = format!("{name}-semibold");
+                fonts.font_data.insert(bold.clone(), data.into());
+                bold
+            }
+            None => name,
+        };
+        semibold_family.push(bold);
+    }
     fonts
         .families
         .insert(FontFamily::Name(FAMILY_SEMIBOLD.into()), semibold_family);
@@ -352,27 +369,37 @@ fn system_text_fonts() -> (Option<FontData>, Option<FontData>) {
 
 #[cfg(not(windows))]
 fn fc_match(family: &str, weight: &str, wght: f32) -> Option<FontData> {
+    let (found, file, index, _) = fc_query(&format!("{family}:weight={weight}"))?;
+    // fontconfig always answers; only take a substitute for the generic name.
+    if family != "sans-serif" && !found.eq_ignore_ascii_case(family) {
+        return None;
+    }
+    fc_load(&file, index, wght)
+}
+
+/// Family, file, face index and supported languages (`he|hu|...`) of the
+/// font fontconfig picks for `pattern`.
+#[cfg(not(windows))]
+fn fc_query(pattern: &str) -> Option<(String, String, u32, String)> {
     let out = std::process::Command::new("fc-match")
-        .args([
-            "-f",
-            "%{family[0]}\n%{file}\n%{index}",
-            &format!("{family}:weight={weight}"),
-        ])
+        .args(["-f", "%{family[0]}\n%{file}\n%{index}\n%{lang}", pattern])
         .output()
         .ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     let mut lines = text.lines();
-    let found = lines.next()?.trim();
-    let file = lines.next()?.trim();
+    let found = lines.next()?.trim().to_owned();
+    let file = lines.next()?.trim().to_owned();
     let index: u32 = lines
         .next()
         .and_then(|i| i.trim().parse().ok())
         .unwrap_or(0)
         & 0xFFFF;
-    // fontconfig always answers; only take a substitute for the generic name.
-    if family != "sans-serif" && !found.eq_ignore_ascii_case(family) {
-        return None;
-    }
+    let langs = lines.next().unwrap_or("").trim().to_owned();
+    Some((found, file, index, langs))
+}
+
+#[cfg(not(windows))]
+fn fc_load(file: &str, index: u32, wght: f32) -> Option<FontData> {
     let bytes = std::fs::read(file).ok()?;
     let mut data = FontData::from_owned(bytes);
     data.index = index;
@@ -380,6 +407,34 @@ fn fc_match(family: &str, weight: &str, wght: f32) -> Option<FontData> {
         data.tweak.coords = egui::epaint::text::VariationCoords::new([(b"wght", wght)]);
     }
     Some(data)
+}
+
+/// Regular and semibold faces for scripts the text face may lack, to fall
+/// back on glyph by glyph: Fedora's Noto Sans has no Hebrew or Arabic
+/// (Segoe UI has both), so typed Hebrew showed as boxes. Each face once,
+/// and only one that covers the language.
+#[cfg(not(windows))]
+fn script_fallbacks() -> Vec<(FontData, Option<FontData>)> {
+    let mut seen = Vec::new();
+    let mut faces = Vec::new();
+    for lang in ["he", "ar"] {
+        let Some((_, file, index, langs)) =
+            fc_query(&format!("sans-serif:lang={lang}:weight=regular"))
+        else {
+            continue;
+        };
+        if seen.contains(&file) || !langs.split('|').any(|l| l == lang) {
+            continue;
+        }
+        let Some(regular) = fc_load(&file, index, 400.0) else {
+            continue;
+        };
+        seen.push(file);
+        let semibold = fc_query(&format!("sans-serif:lang={lang}:weight=semibold"))
+            .and_then(|(_, file, index, _)| fc_load(&file, index, 600.0));
+        faces.push((regular, semibold));
+    }
+    faces
 }
 
 #[cfg(test)]
