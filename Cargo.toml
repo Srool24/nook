@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/app", "crates/ui", "crates/platform", "crates/modules"]
+exclude = ["patches"]
 
 [workspace.package]
 version = "0.2.0"
@@ -32,3 +33,8 @@ nook-modules = { path = "crates/modules" }
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# Right-to-left text (Hebrew, Arabic): egui's epaint with a bidi pass, see
+# patches/README.md.
+[patch.crates-io]
+epaint = { path = "patches/epaint" }
