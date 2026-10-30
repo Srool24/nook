@@ -26,7 +26,7 @@ use nook_ui::module::{Badge, Module, Registry};
 use nook_ui::paint;
 use nook_ui::shell::{Shell, ShellDrag, ShellMetrics, ShellOutput};
 use nook_ui::shell_state::ShellTimings;
-use nook_ui::theme::{self, FALLBACK_ACCENT, SIZE_BODY, SIZE_LABEL, Theme, ThemeMode};
+use nook_ui::theme::{self, FALLBACK_ACCENT, SIZE_BODY, SIZE_LABEL, Theme};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -330,12 +330,9 @@ impl NookApp {
         })
     }
 
+    /// The system's appearance (`cfg.theme` is no longer offered).
     fn dark(&self) -> bool {
-        match self.cfg.theme {
-            ThemeMode::Dark => true,
-            ThemeMode::Light => false,
-            ThemeMode::Auto => !self.sys.light_theme,
-        }
+        !self.sys.light_theme
     }
 
     fn accent(&self) -> Color32 {

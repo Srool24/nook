@@ -9,8 +9,7 @@ use nook_ui::bento::PANEL_PADDING;
 use nook_ui::module::{Module, TileCtx, TileSize};
 use nook_ui::shell::{ContentCtx, Placement};
 use nook_ui::theme::{
-    FALLBACK_ACCENT, SIZE_BODY, SIZE_ICON, SIZE_LABEL, Theme, ThemeMode, parse_hex, to_hex,
-    with_alpha,
+    FALLBACK_ACCENT, SIZE_BODY, SIZE_ICON, SIZE_LABEL, Theme, parse_hex, to_hex, with_alpha,
 };
 use nook_ui::{icons, paint, widgets};
 
@@ -24,7 +23,7 @@ const TOP_CARD: f32 = 154.0;
 /// Height of a collapsible card's clickable header.
 const DISCLOSURE: f32 = 44.0;
 /// Revealed height of each collapsible section's body.
-const BODY: [f32; 2] = [4.0 * ROW + 14.0, 2.0 * ROW + 14.0];
+const BODY: [f32; 2] = [3.0 * ROW + 14.0, 2.0 * ROW + 14.0];
 /// Page height with every section collapsed, panel padding included.
 const BASE: f32 =
     2.0 * PANEL_PADDING + HEADER + GAP + TOP_CARD + GAP + DISCLOSURE + GAP + DISCLOSURE;
@@ -224,15 +223,16 @@ pub fn page(
 
             let mut lui = card_ui(ui, left);
             section_title(&mut lui, "Appearance", theme);
-            let mut theme_idx = match cfg.theme {
-                ThemeMode::Auto => 0,
-                ThemeMode::Dark => 1,
-                ThemeMode::Light => 2,
+            // No light/dark switch here: Nook follows the system's
+            // appearance, like every other app (HIG, Dark Mode).
+            let mut mat_idx = match cfg.material {
+                Material::Acrylic => 0,
+                Material::Solid => 1,
             };
-            if row(&mut lui, "Theme", theme, |ui| {
-                widgets::segmented(ui, &["Auto", "Dark", "Light"], &mut theme_idx, theme)
+            if row(&mut lui, "Material", theme, |ui| {
+                widgets::segmented(ui, &["Glass", "Solid"], &mut mat_idx, theme)
             }) {
-                cfg.theme = [ThemeMode::Auto, ThemeMode::Dark, ThemeMode::Light][theme_idx];
+                cfg.material = [Material::Acrylic, Material::Solid][mat_idx];
                 out.changed = true;
             }
             let mut accent_idx = match cfg.accent {
@@ -484,7 +484,7 @@ fn advanced_summary(cfg: &Config) -> String {
     )
 }
 
-/// Material, background tint, glass opacity, accent color and film grain,
+/// Background tint, glass opacity, accent color and film grain,
 /// in two columns.
 fn customize_body(ui: &mut Ui, rect: Rect, theme: &Theme, cfg: &mut Config, out: &mut PageOutput) {
     let inner = rect.shrink2(vec2(14.0, 6.0));
@@ -504,16 +504,6 @@ fn customize_body(ui: &mut Ui, rect: Rect, theme: &Theme, cfg: &mut Config, out:
     };
 
     let mut lui = column(ui, left);
-    let mut mat_idx = match cfg.material {
-        Material::Acrylic => 0,
-        Material::Solid => 1,
-    };
-    if row(&mut lui, "Material", theme, |ui| {
-        widgets::segmented(ui, &["Glass", "Solid"], &mut mat_idx, theme)
-    }) {
-        cfg.material = [Material::Acrylic, Material::Solid][mat_idx];
-        out.changed = true;
-    }
     let mut bg_idx = match parse_hex(&cfg.background_hex) {
         None => Some(0),
         Some(c) => BACKGROUNDS.iter().position(|b| *b == Some(c)),

@@ -51,7 +51,7 @@ impl Default for Look {
         Self {
             glass_opacity: 0.70,
             tint: None,
-            grain: 0.35,
+            grain: 0.0,
             grain_px: 1.0,
         }
     }

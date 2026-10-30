@@ -446,6 +446,15 @@ pub fn show(
                     // layer under the pointer and nothing in it hovers.
                     ui.expand_to_include_rect(rect);
                     let resp = ui.interact(rect, id.with("tile"), sense);
+                    // Icon-only tiles show their name only on hover; screen
+                    // readers get it always.
+                    resp.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            interactive,
+                            tile.module.name(),
+                        )
+                    });
                     let hovered = interactive && ui.rect_contains_pointer(rect);
                     let pressed = hovered && ctx.input(|i| i.pointer.primary_down());
                     if hovered && drag.is_none() {

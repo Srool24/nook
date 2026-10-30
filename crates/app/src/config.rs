@@ -74,6 +74,8 @@ pub struct ModulesConfig {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    /// Unused: Nook follows the system appearance. Kept so older configs
+    /// that set it still parse.
     pub theme: ThemeMode,
     pub accent: AccentSource,
     pub accent_hex: String,
@@ -86,6 +88,10 @@ pub struct Config {
     /// Film-grain strength in percent; 0 turns the grain off.
     pub grain: u8,
     pub grain_size: GrainSize,
+    /// Revision of the look defaults this config was made with; see
+    /// [`Config::migrate`]. Configs from before revisions read as 0.
+    #[serde(default)]
+    pub look_rev: u8,
     /// Top-left corner, top center or top-right corner.
     pub placement: Placement,
     /// Where the notch was dragged, instead of `placement`: its center as
@@ -126,6 +132,7 @@ impl Default for Config {
             background_hex: String::new(),
             grain: DEFAULT_GRAIN,
             grain_size: GrainSize::Fine,
+            look_rev: LOOK_REV,
             placement: Placement::Center,
             notch_x: None,
             notch_y: 0.0,
@@ -152,7 +159,12 @@ impl Default for Config {
 }
 
 pub const DEFAULT_GLASS_OPACITY: u8 = 70;
-pub const DEFAULT_GRAIN: u8 = 35;
+/// No grain: on glass it is decoration, not information (HIG, Materials).
+pub const DEFAULT_GRAIN: u8 = 0;
+/// The grain used to default to this.
+const OLD_DEFAULT_GRAIN: u8 = 35;
+/// Current [`Config::look_rev`].
+const LOOK_REV: u8 = 1;
 
 impl Config {
     /// The styling settings as the theme takes them.
@@ -192,7 +204,12 @@ impl Config {
         let path = path()?;
         match std::fs::read_to_string(&path) {
             Ok(text) => match toml::from_str::<Config>(&text) {
-                Ok(cfg) => Ok(cfg),
+                Ok(mut cfg) => {
+                    if cfg.migrate() {
+                        cfg.save()?;
+                    }
+                    Ok(cfg)
+                }
                 Err(e) => {
                     tracing::error!("config parse error, using defaults: {e}");
                     let _ = std::fs::rename(&path, path.with_extension("toml.bad"));
@@ -208,6 +225,21 @@ impl Config {
             }
             Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
         }
+    }
+
+    /// Moves a config made with older look defaults to the current ones,
+    /// keeping what the user changed. True when something changed.
+    fn migrate(&mut self) -> bool {
+        if self.look_rev >= LOOK_REV {
+            return false;
+        }
+        // Revision 1 turned the grain off by default; a config still at
+        // the old default never had it set by hand.
+        if self.grain == OLD_DEFAULT_GRAIN {
+            self.grain = DEFAULT_GRAIN;
+        }
+        self.look_rev = LOOK_REV;
+        true
     }
 
     pub fn save(&self) -> Result<()> {
@@ -268,6 +300,23 @@ mod tests {
         let old: Config = toml::from_str("theme = \"dark\"").expect("parse");
         assert_eq!(old.grain, DEFAULT_GRAIN);
         assert_eq!(old.look().tint, None);
+    }
+
+    #[test]
+    fn old_default_grain_is_migrated_once() {
+        let mut old: Config = toml::from_str("grain = 35").expect("parse");
+        assert_eq!(old.look_rev, 0);
+        assert!(old.migrate());
+        assert_eq!(old.grain, 0);
+        assert!(!old.migrate());
+        // A grain picked by hand stays.
+        let mut picked: Config = toml::from_str("grain = 50").expect("parse");
+        picked.migrate();
+        assert_eq!(picked.grain, 50);
+        // So does one picked after the migration.
+        let mut new: Config = toml::from_str("grain = 35\nlook_rev = 1").expect("parse");
+        assert!(!new.migrate());
+        assert_eq!(new.grain, 35);
     }
 
     #[test]

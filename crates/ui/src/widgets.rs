@@ -272,7 +272,32 @@ pub fn swatches(
     resp
 }
 
-/// Round icon button with a hover wash and press scale.
+/// What a screen reader announces for an icon-only button, by its glyph.
+fn icon_name(glyph: &str) -> Option<&'static str> {
+    use crate::icons as i;
+    Some(match glyph {
+        i::ARROW_LEFT => "Back",
+        i::ARROWS_CLOCKWISE => "Refresh",
+        i::ARROW_COUNTER_CLOCKWISE => "Reset",
+        i::ARROW_SQUARE_OUT => "Open",
+        i::ARROW_U_UP_LEFT => "Undo",
+        i::BROOM => "Clear",
+        i::CHECK => "Done",
+        i::COPY => "Copy",
+        i::EYEDROPPER => "Pick a color",
+        i::FLOPPY_DISK => "Save",
+        i::FOLDER_OPEN => "Open folder",
+        i::PLUS => "New",
+        i::SELECTION => "Select an area",
+        i::TRASH => "Delete",
+        i::GEAR => "Settings",
+        i::X => "Close",
+        _ => return None,
+    })
+}
+
+/// Round icon button with a hover wash and press scale. Common glyphs get
+/// a name for screen readers (see [`icon_name`]).
 pub fn icon_button(
     ui: &mut Ui,
     glyph: &'static str,
@@ -281,6 +306,9 @@ pub fn icon_button(
     theme: &Theme,
 ) -> Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click());
+    if let Some(name) = icon_name(glyph) {
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
+    }
     let hover = anim::spring(
         ui.ctx(),
         resp.id.with("hover"),
