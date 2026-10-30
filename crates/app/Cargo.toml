@@ -39,6 +39,9 @@ nook-modules.workspace = true
 # cannot place themselves, stay on top or let clicks through a shape.
 [target.'cfg(target_os = "linux")'.dependencies]
 eframe = { workspace = true, features = ["x11"] }
+# To pick winit's X11 backend at run time: accesskit (screen readers) also
+# builds in the Wayland one, which winit would otherwise prefer on GNOME.
+winit = { version = "0.30", default-features = false, features = ["x11"] }
 # The tray icon (AppIndicator) needs GTK running on a thread of its own.
 gtk = "0.18"
 glib = "0.18"

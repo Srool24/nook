@@ -97,6 +97,14 @@ fn main() -> Result<()> {
         renderer: eframe::Renderer::Glow,
         centered: false,
         persist_window: false,
+        #[cfg(target_os = "linux")]
+        event_loop_builder: Some(Box::new(|builder| {
+            use winit::platform::x11::EventLoopBuilderExtX11;
+            // Only the X11 backend works here (see `prepare_x11`); with a
+            // Wayland session around, winit would pick Wayland and glutin
+            // would refuse its window.
+            builder.with_x11();
+        })),
         ..Default::default()
     };
 

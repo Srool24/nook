@@ -2557,6 +2557,7 @@ dependencies = [
  "tracing-subscriber",
  "tray-icon",
  "ureq",
+ "winit",
  "winresource",
 ]
 
