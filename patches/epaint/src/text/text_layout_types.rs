@@ -1345,8 +1345,56 @@ impl Galley {
 
 /// ## Cursor positions
 impl Galley {
-    #[expect(clippy::unused_self)]
+    /// Arrow-key move by one char on screen in a row holding right-to-left
+    /// text: to the nearest cursor position to the left (or right). At the
+    /// row's edge it goes on in reading order, to the next or the previous
+    /// row. `None` for rows with no right-to-left text (moves stay logical).
+    fn cursor_visual_step(&self, cursor: &CCursor, leftwards: bool) -> Option<CCursor> {
+        let layout = self.layout_from_cursor(*cursor);
+        let row = &self.rows.get(layout.row)?.row;
+        if !row.glyphs.iter().any(|g| g.rtl) {
+            return None;
+        }
+        let here = row.x_offset(layout.column);
+        let mut best: Option<(f32, CharIndex)> = None;
+        for c in 0..=row.glyphs.len() {
+            let column = CharIndex(c);
+            let x = row.x_offset(column);
+            let ahead = if leftwards { here - x } else { x - here };
+            if ahead > 0.01 && best.is_none_or(|(d, _)| ahead < d) {
+                best = Some((ahead, column));
+            }
+        }
+        if let Some((_, column)) = best {
+            return Some(self.cursor_from_layout(LayoutCursor {
+                row: layout.row,
+                column,
+            }));
+        }
+        // At the edge: a row laid out right to left (its start on the
+        // right) continues leftwards into the text after it.
+        let count = row.char_count_excluding_newline();
+        let rtl_row = row.x_offset(CharIndex::ZERO) > row.x_offset(count);
+        let forwards = leftwards == rtl_row;
+        Some(if forwards {
+            CCursor {
+                index: (cursor.index + 1).min(self.end().index),
+                prefer_next_row: true,
+            }
+        } else if cursor.index == CharIndex::ZERO {
+            Default::default()
+        } else {
+            CCursor {
+                index: cursor.index - 1,
+                prefer_next_row: true,
+            }
+        })
+    }
+
     pub fn cursor_left_one_character(&self, cursor: &CCursor) -> CCursor {
+        if let Some(moved) = self.cursor_visual_step(cursor, true) {
+            return moved;
+        }
         if cursor.index == CharIndex::ZERO {
             Default::default()
         } else {
@@ -1358,6 +1406,9 @@ impl Galley {
     }
 
     pub fn cursor_right_one_character(&self, cursor: &CCursor) -> CCursor {
+        if let Some(moved) = self.cursor_visual_step(cursor, false) {
+            return moved;
+        }
         CCursor {
             index: (cursor.index + 1).min(self.end().index),
             prefer_next_row: true, // default to this when navigating. It is more often useful to put cursor at the beginning of a row than at the end.

@@ -21,6 +21,9 @@ This copy of `epaint` 0.36.2 (MIT OR Apache-2.0, from crates.io, used via
 - `Glyph::rtl` marks right-to-left glyphs; `Row::x_offset` puts the cursor
   at a char's leading edge and `Row::char_at` takes the nearest cursor
   position, so clicking and drawing the cursor work in mixed text.
+- `Galley::cursor_left_one_character` / `cursor_right_one_character` move
+  on screen in rows holding right-to-left text (the left arrow goes left),
+  continuing in reading order at a row's edge.
 
 Rows with no right-to-left char take none of the new paths. Tests:
 `test_bidi_*` in `text_layout.rs` (`cargo test --lib` in this folder).

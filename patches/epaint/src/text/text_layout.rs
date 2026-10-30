@@ -1695,6 +1695,35 @@ mod tests {
     }
 
     #[test]
+    fn test_bidi_arrow_keys_move_on_screen() {
+        let mut fonts = FontsImpl::new(TextOptions::default(), FontDefinitions::default());
+        let galley = bidi_galley("שלום abc", &mut fonts);
+        let at = |i: usize| CCursor {
+            index: CharIndex(i),
+            prefer_next_row: true,
+        };
+        let x = |c: &CCursor| galley.pos_from_cursor(*c).min.x;
+        // From the start (right edge) the left arrow goes into the word,
+        // one char at a time, leftwards on screen.
+        let mut c = at(0);
+        for _ in 0..3 {
+            let next = galley.cursor_left_one_character(&c);
+            assert!(x(&next) < x(&c), "{c:?} -> {next:?}");
+            c = next;
+        }
+        assert_eq!(c.index, CharIndex(3));
+        // The right arrow comes back the same way.
+        for _ in 0..3 {
+            c = galley.cursor_right_one_character(&c);
+        }
+        assert_eq!(c.index, CharIndex(0));
+        // Left-to-right text keeps the usual logical moves.
+        let latin = bidi_galley("abc", &mut fonts);
+        assert_eq!(latin.cursor_left_one_character(&at(2)).index, CharIndex(1));
+        assert_eq!(latin.cursor_right_one_character(&at(2)).index, CharIndex(3));
+    }
+
+    #[test]
     fn test_bidi_shaped_rtl_run_keeps_one_glyph_per_char() {
         // Needs a face with Hebrew so the run goes through RTL shaping.
         let Some(bytes) = ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf"]
