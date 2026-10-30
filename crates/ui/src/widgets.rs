@@ -6,7 +6,7 @@ use crate::geometry::Squircle;
 use crate::paint;
 use crate::spring::SpringParams;
 use crate::theme::{SIZE_LABEL, Theme, mix, with_alpha};
-use egui::{Align2, Color32, Response, Sense, Stroke, Ui, pos2, vec2};
+use egui::{Align, Align2, Color32, Response, Sense, Stroke, Ui, pos2, vec2};
 
 /// Size of [`toggle`].
 pub const TOGGLE_SIZE: egui::Vec2 = vec2(36.0, 22.0);
@@ -78,6 +78,20 @@ pub fn toggle(ui: &mut Ui, on: &mut bool, theme: &Theme) -> Response {
     painter.rect_filled(knob.translate(vec2(0.0, 1.0)).expand(0.5), d, shadow);
     painter.rect_filled(knob, d * 0.5, Color32::WHITE);
     resp
+}
+
+/// Where text starts: on the right when its first letter is Hebrew or
+/// Arabic, so text fields hold right-to-left writing against the right
+/// edge. Empty or neutral text (digits, punctuation) starts on the left.
+pub fn reading_align(text: &str) -> Align {
+    let rtl = |c: char| {
+        matches!(c as u32,
+            0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF | 0x1EE00..=0x1EEFF)
+    };
+    match text.chars().find(|c| c.is_alphabetic()) {
+        Some(c) if rtl(c) => Align::RIGHT,
+        _ => Align::LEFT,
+    }
 }
 
 /// Segmented control; the highlight slides between options on a spring.
@@ -382,4 +396,17 @@ pub fn card(painter: &egui::Painter, rect: egui::Rect, theme: &Theme) {
         outline,
         egui::epaint::PathStroke::new(1.0, theme.tile_rim),
     ));
+}
+
+#[cfg(test)]
+mod reading_tests {
+    use super::*;
+
+    #[test]
+    fn right_to_left_text_aligns_right() {
+        assert_eq!(reading_align("שלום world"), Align::RIGHT);
+        assert_eq!(reading_align("123 مرحبا"), Align::RIGHT);
+        assert_eq!(reading_align("hello שלום"), Align::LEFT);
+        assert_eq!(reading_align(""), Align::LEFT);
+    }
 }

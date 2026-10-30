@@ -272,8 +272,10 @@ impl Notes {
             .max_height(inner.height())
             .auto_shrink([false, false])
             .show(&mut eui, |ui| {
+                let align = nook_ui::widgets::reading_align(&note.text);
                 let edit = TextEdit::multiline(&mut note.text)
                     .id(Id::new(("nook-note", note.path.clone())))
+                    .horizontal_align(align)
                     .frame(egui::Frame::NONE)
                     .font(Theme::font(SIZE_BODY))
                     .text_color(theme.text)

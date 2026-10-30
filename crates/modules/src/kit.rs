@@ -191,9 +191,11 @@ pub fn field(
             .max_rect(inner)
             .layout(Layout::left_to_right(Align::Center)),
     );
+    let align = nook_ui::widgets::reading_align(text);
     child.add(
         TextEdit::singleline(text)
             .id(id)
+            .horizontal_align(align)
             .frame(egui::Frame::NONE)
             .font(font)
             .text_color(theme.text)
