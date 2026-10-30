@@ -87,3 +87,5 @@ ab_glyph = "0.2"
 arboard = { version = "3.7", default-features = false, features = ["image-data"] }
 # Album art that players serve over HTTP(S).
 ureq = { version = "2.12", default-features = false, features = ["tls"] }
+# Theme and app icons, which are SVG on GNOME (Adwaita, hicolor/scalable).
+resvg = { version = "0.49", default-features = false }

@@ -24,7 +24,8 @@ fn icon_roots() -> Vec<PathBuf> {
 }
 
 /// The best file for icon `name` near `size` pixels: a PNG of at least that
-/// size if there is one, an SVG otherwise. Absolute names are taken as is.
+/// size if there is one, then an SVG, then a smaller PNG. Absolute names are
+/// taken as is.
 pub fn lookup(name: &str, size: u32) -> Option<PathBuf> {
     let p = Path::new(name);
     if p.is_absolute() {
@@ -32,12 +33,9 @@ pub fn lookup(name: &str, size: u32) -> Option<PathBuf> {
     }
     let themes = ["hicolor", "Adwaita", "AdwaitaLegacy", "breeze", "gnome"];
     let sizes = [256u32, 192, 128, 96, 72, 64, 48, 32, 24, 16];
-    let ordered: Vec<u32> = {
-        let mut bigger: Vec<u32> = sizes.iter().copied().filter(|&s| s >= size).collect();
-        bigger.reverse();
-        let smaller = sizes.iter().copied().filter(|&s| s < size);
-        bigger.into_iter().chain(smaller).collect()
-    };
+    let mut bigger: Vec<u32> = sizes.iter().copied().filter(|&s| s >= size).collect();
+    bigger.reverse();
+    let smaller: Vec<u32> = sizes.iter().copied().filter(|&s| s < size).collect();
     let kinds = [
         "apps",
         "mimetypes",
@@ -54,24 +52,28 @@ pub fn lookup(name: &str, size: u32) -> Option<PathBuf> {
             if !base.is_dir() {
                 continue;
             }
-            for s in &ordered {
-                for kind in kinds {
-                    let f = base
-                        .join(format!("{s}x{s}"))
-                        .join(kind)
-                        .join(format!("{name}.png"));
-                    if f.exists() {
-                        return Some(f);
-                    }
-                }
-            }
-            for dir in ["scalable", "symbolic"] {
-                for kind in kinds {
-                    let f = base.join(dir).join(kind).join(format!("{name}.svg"));
-                    if f.exists() {
-                        return Some(f);
-                    }
-                }
+            let png = |sizes: &[u32]| {
+                sizes.iter().find_map(|s| {
+                    kinds
+                        .iter()
+                        .map(|kind| {
+                            base.join(format!("{s}x{s}"))
+                                .join(kind)
+                                .join(format!("{name}.png"))
+                        })
+                        .find(|f| f.exists())
+                })
+            };
+            let svg = || {
+                ["scalable", "symbolic"].iter().find_map(|dir| {
+                    kinds
+                        .iter()
+                        .map(|kind| base.join(dir).join(kind).join(format!("{name}.svg")))
+                        .find(|f| f.exists())
+                })
+            };
+            if let Some(f) = png(&bigger).or_else(svg).or_else(|| png(&smaller)) {
+                return Some(f);
             }
         }
     }
