@@ -705,16 +705,18 @@ fn row(
 ) -> bool {
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(w, ROW), Sense::hover());
-    ui.painter().text(
+    let label_rect = ui.painter().text(
         pos2(rect.min.x, rect.center().y),
         Align2::LEFT_CENTER,
         label,
         Theme::font(SIZE_BODY),
         theme.text,
     );
+    // The control gets what the label leaves, with a gap between them.
+    let room = Rect::from_min_max(pos2(label_rect.max.x + 12.0, rect.min.y), rect.max);
     let mut cui = ui.new_child(
         UiBuilder::new()
-            .max_rect(rect)
+            .max_rect(room)
             .layout(Layout::right_to_left(Align::Center)),
     );
     control(&mut cui).changed()

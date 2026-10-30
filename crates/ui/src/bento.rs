@@ -134,9 +134,15 @@ fn tile_glass(painter: &egui::Painter, rect: Rect, theme: &Theme, active: bool, 
     } else {
         (theme.tile_top, theme.tile_bottom)
     };
-    let hover = with_alpha(theme.text, if theme.dark { 0.10 } else { 0.05 });
-    let top = theme::mix(top, hover, lift * 0.5);
-    let bottom = theme::mix(bottom, hover, lift * 0.5);
+    // Hover tints toward the text color (lighter in dark, darker in
+    // light), keeping the fill's opacity.
+    let t = lift * if theme.dark { 0.06 } else { 0.035 };
+    let tint = |c: Color32| {
+        let a = c.a();
+        let [r, g, b, _] = theme::mix(c, theme.text, t).to_srgba_unmultiplied();
+        Color32::from_rgba_unmultiplied(r, g, b, a)
+    };
+    let (top, bottom) = (tint(top), tint(bottom));
     paint::fill_gradient(painter, &outline, top, bottom);
     painter.add(egui::epaint::PathShape::closed_line(
         outline,
@@ -491,6 +497,14 @@ pub fn show(
                     }
                     let active = ready && !editing && tile.module.is_active();
                     tile_glass(&painter, rect, theme, active, lift);
+                    if resp.has_focus() && crate::widgets::keyboard_navigating(&ctx) {
+                        painter.rect_stroke(
+                            rect.expand(2.0),
+                            TILE_RADIUS + 2.0,
+                            egui::Stroke::new(2.0, with_alpha(theme.accent, 0.85)),
+                            egui::StrokeKind::Outside,
+                        );
+                    }
                     if is_open {
                         painter.rect_stroke(
                             rect.shrink(0.5),

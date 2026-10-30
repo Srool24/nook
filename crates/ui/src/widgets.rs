@@ -16,6 +16,7 @@ pub const TOGGLE_SIZE: egui::Vec2 = vec2(36.0, 22.0);
 /// pressed; the off track keeps a rim so the switch reads on any glass.
 pub fn toggle(ui: &mut Ui, on: &mut bool, theme: &Theme) -> Response {
     let (rect, mut resp) = ui.allocate_exact_size(TOGGLE_SIZE, Sense::click());
+    focus_ring(ui, &resp, rect, rect.height() * 0.5, theme);
     if resp.clicked() {
         *on = !*on;
         resp.mark_changed();
@@ -97,28 +98,27 @@ pub fn reading_align(text: &str) -> Align {
 /// Segmented control; the highlight slides between options on a spring.
 pub fn segmented(ui: &mut Ui, options: &[&str], selected: &mut usize, theme: &Theme) -> Response {
     let font = Theme::font(SIZE_LABEL);
-    // Each segment fits its own label, so one long option doesn't widen
-    // the rest (and push the control over its row's label).
-    let widths: Vec<f32> = options
+    // Equal segments (HIG, Segmented controls: "keep segment size
+    // consistent"), each as wide as the widest label plus padding.
+    let widest = options
         .iter()
         .map(|o| {
             ui.painter()
                 .layout_no_wrap((*o).to_owned(), font.clone(), theme.text)
                 .size()
                 .x
-                + 16.0
         })
-        .collect();
-    let lefts: Vec<f32> = widths
-        .iter()
-        .scan(2.0, |x, w| {
-            let left = *x;
-            *x += w;
-            Some(left)
-        })
+        .fold(0.0_f32, f32::max);
+    // Roomy padding when there's space, tighter (never under 4) when not.
+    let room = (ui.available_width() - 4.0) / options.len().max(1) as f32;
+    let widest = (widest + 12.0).min(room.max(widest + 4.0));
+    let widths = vec![widest; options.len()];
+    let lefts: Vec<f32> = (0..options.len())
+        .map(|i| 2.0 + widest * i as f32)
         .collect();
     let size = vec2(widths.iter().sum::<f32>() + 4.0, 24.0);
     let (rect, mut resp) = ui.allocate_exact_size(size, Sense::click());
+    focus_ring(ui, &resp, rect, rect.height() * 0.5, theme);
     let painter = ui.painter();
     let track = if theme.dark {
         Color32::from_white_alpha(14)
@@ -161,6 +161,15 @@ pub fn segmented(ui: &mut Ui, options: &[&str], selected: &mut usize, theme: &Th
         Color32::WHITE
     };
     painter.rect_filled(hl, 10.0, hl_fill);
+    if !theme.dark {
+        // White on the light track is 1.1:1; an edge marks the selection.
+        painter.rect_stroke(
+            hl,
+            10.0,
+            Stroke::new(1.0, Color32::from_black_alpha(28)),
+            egui::StrokeKind::Inside,
+        );
+    }
     for (i, o) in options.iter().enumerate() {
         let c = pos2(rect.min.x + lefts[i] + widths[i] * 0.5, rect.center().y);
         let near = 1.0 - (pos - i as f32).abs().min(1.0);
@@ -231,6 +240,7 @@ pub fn swatches(
     let n = colors.len() as f32;
     let size = vec2(n * D + (n - 1.0).max(0.0) * GAP, 22.0);
     let (rect, mut resp) = ui.allocate_exact_size(size, Sense::click());
+    focus_ring(ui, &resp, rect, rect.height() * 0.5, theme);
     let hovered = resp
         .hover_pos()
         .map(|p| (((p.x - rect.min.x) / (D + GAP)) as usize).min(colors.len() - 1));
@@ -272,6 +282,35 @@ pub fn swatches(
     resp
 }
 
+/// Focus moved by Tab since the last click. A click also focuses a widget
+/// in egui, and that shouldn't draw a ring.
+pub fn keyboard_navigating(ctx: &egui::Context) -> bool {
+    let id = egui::Id::new("nook-keyboard-nav");
+    let (tab, click) = ctx.input(|i| (i.key_pressed(egui::Key::Tab), i.pointer.any_pressed()));
+    ctx.data_mut(|d| {
+        let nav = d.get_temp_mut_or(id, false);
+        if tab {
+            *nav = true;
+        } else if click {
+            *nav = false;
+        }
+        *nav
+    })
+}
+
+/// The keyboard focus ring (macOS's keyboard focus indicator): an accent
+/// outline just outside `rect`, while `resp` has keyboard focus.
+pub fn focus_ring(ui: &Ui, resp: &Response, rect: egui::Rect, radius: f32, theme: &Theme) {
+    if resp.has_focus() && keyboard_navigating(ui.ctx()) {
+        ui.painter().rect_stroke(
+            rect.expand(2.0),
+            radius + 2.0,
+            Stroke::new(2.0, with_alpha(theme.accent, 0.85)),
+            egui::StrokeKind::Outside,
+        );
+    }
+}
+
 /// What a screen reader announces for an icon-only button, by its glyph.
 fn icon_name(glyph: &str) -> Option<&'static str> {
     use crate::icons as i;
@@ -306,6 +345,7 @@ pub fn icon_button(
     theme: &Theme,
 ) -> Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click());
+    focus_ring(ui, &resp, rect, rect.height() * 0.5, theme);
     if let Some(name) = icon_name(glyph) {
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
     }
@@ -455,5 +495,37 @@ mod reading_tests {
         assert_eq!(reading_align("123 مرحبا"), Align::RIGHT);
         assert_eq!(reading_align("hello שלום"), Align::LEFT);
         assert_eq!(reading_align(""), Align::LEFT);
+    }
+
+    #[test]
+    fn focus_ring_follows_the_keyboard_not_clicks() {
+        let ctx = egui::Context::default();
+        let frame = |events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            let mut nav = false;
+            let mut out = ctx.run_ui(input, |ui| nav = keyboard_navigating(ui.ctx()));
+            out.textures_delta.clear();
+            nav
+        };
+        assert!(!frame(vec![]));
+        let tab = egui::Event::Key {
+            key: egui::Key::Tab,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Default::default(),
+        };
+        assert!(frame(vec![tab]));
+        assert!(frame(vec![]), "stays on until a click");
+        let click = egui::Event::PointerButton {
+            pos: egui::pos2(1.0, 1.0),
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Default::default(),
+        };
+        assert!(!frame(vec![click]));
     }
 }
