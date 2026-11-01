@@ -84,7 +84,7 @@ fn ago(when: SystemTime, now: SystemTime) -> String {
 }
 
 fn notes_dir() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("Nook").join("notes"))
+    shell::app_dir().map(|d| d.join("notes"))
 }
 
 fn load(dir: &Path) -> Vec<Note> {
@@ -272,8 +272,10 @@ impl Notes {
             .max_height(inner.height())
             .auto_shrink([false, false])
             .show(&mut eui, |ui| {
+                let align = nook_ui::widgets::reading_align(&note.text);
                 let edit = TextEdit::multiline(&mut note.text)
                     .id(Id::new(("nook-note", note.path.clone())))
+                    .horizontal_align(align)
                     .frame(egui::Frame::NONE)
                     .font(Theme::font(SIZE_BODY))
                     .text_color(theme.text)

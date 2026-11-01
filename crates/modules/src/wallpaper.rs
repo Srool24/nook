@@ -59,7 +59,7 @@ enum Event {
 }
 
 fn config_file() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("Nook").join("wallpaper.txt"))
+    nook_platform::shell::app_dir().map(|d| d.join("wallpaper.txt"))
 }
 
 fn is_picture(path: &Path) -> bool {
@@ -266,7 +266,7 @@ impl Wallpaper {
         let start = self
             .folder
             .clone()
-            .or_else(|| std::env::var_os("USERPROFILE").map(|u| PathBuf::from(u).join("Pictures")));
+            .or_else(nook_platform::shell::pictures_dir);
         let ctx = self.ctx.clone();
         spawn("nook-wallpaper-pick", move || {
             let dir = wallpaper::pick_folder("Choose your wallpaper folder", start.as_deref())

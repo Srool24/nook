@@ -10,12 +10,13 @@ use crate::update::{self, Updater};
 use crate::watcher::{self, SystemState, WatcherControl};
 use anyhow::{Context as _, Result};
 use crossbeam_channel::{Receiver, unbounded};
-use egui::{Color32, FontFamily, FontId, Rect, Ui, pos2, vec2};
+use egui::{Color32, FontFamily, FontId, Rect, Ui, Vec2, pos2, vec2};
 use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use nook_platform::backdrop::{Backdrop, Tint};
 use nook_platform::hittest::{HitShape, HitTester};
 use nook_platform::material::{self, Applied};
+use nook_platform::notifications::{Notification, NotificationWatcher};
 use nook_platform::single_instance::InstanceGuard;
 use nook_platform::system::Battery;
 use nook_platform::{Hwnd, startup, system, wallpaper, window};
@@ -23,10 +24,10 @@ use nook_ui::anim::{self, Motion};
 use nook_ui::bento;
 use nook_ui::geometry::Squircle;
 use nook_ui::module::{Badge, Module, Registry};
-use nook_ui::paint;
-use nook_ui::shell::{Shell, ShellMetrics, ShellOutput};
+use nook_ui::shell::{Shell, ShellDrag, ShellMetrics, ShellOutput};
 use nook_ui::shell_state::ShellTimings;
-use nook_ui::theme::{self, FALLBACK_ACCENT, SIZE_BODY, SIZE_LABEL, Theme, ThemeMode};
+use nook_ui::theme::{self, FALLBACK_ACCENT, SIZE_BODY, SIZE_LABEL, Theme};
+use nook_ui::{icons_fill, paint};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -49,6 +50,28 @@ struct Hotkeys {
     /// Module hotkeys and the module each belongs to.
     modules: Vec<(HotKey, &'static str)>,
     rx: Receiver<GlobalHotKeyEvent>,
+    /// GNOME custom shortcuts stand in for key grabs (Linux, Wayland).
+    #[cfg(target_os = "linux")]
+    desktop: Option<DesktopShortcuts>,
+}
+
+/// Shortcuts registered with GNOME, and the ids they send back.
+#[cfg(target_os = "linux")]
+struct DesktopShortcuts {
+    wanted: Vec<crate::shortcuts::Shortcut>,
+    rx: Option<Receiver<String>>,
+}
+
+#[cfg(target_os = "linux")]
+impl DesktopShortcuts {
+    fn set(&mut self, id: &str, name: &str, accel: &str) {
+        self.wanted.retain(|s| s.id != id);
+        self.wanted.push(crate::shortcuts::Shortcut {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            accel: accel.to_owned(),
+        });
+    }
 }
 
 impl Hotkeys {
@@ -57,6 +80,15 @@ impl Hotkeys {
         let Some(accel) = m.default_hotkey() else {
             return;
         };
+        #[cfg(target_os = "linux")]
+        if let Some(d) = &mut self.desktop {
+            d.set(m.id(), m.name(), accel);
+            if let Ok(hk) = HotKey::from_str(accel) {
+                self.modules.push((hk, m.id()));
+            }
+            crate::shortcuts::sync(d.wanted.clone());
+            return;
+        }
         match HotKey::from_str(accel).map(|hk| (self.manager.register(hk), hk)) {
             Ok((Ok(()), hk)) => self.modules.push((hk, m.id())),
             Ok((Err(e), _)) => tracing::warn!("hotkey {accel} for {} unavailable: {e}", m.id()),
@@ -66,6 +98,13 @@ impl Hotkeys {
 
     /// Frees the shortcut of a module that was taken out (a plugin).
     fn remove_module(&mut self, id: &str) {
+        #[cfg(target_os = "linux")]
+        if let Some(d) = &mut self.desktop {
+            d.wanted.retain(|s| s.id != id);
+            self.modules.retain(|(_, m)| *m != id);
+            crate::shortcuts::sync(d.wanted.clone());
+            return;
+        }
         for (hk, _) in self.modules.iter().filter(|(_, m)| *m == id) {
             if let Err(e) = self.manager.unregister(*hk) {
                 tracing::warn!("releasing hotkey for {id}: {e}");
@@ -94,6 +133,10 @@ pub struct NookApp {
     accent_rx: Receiver<Option<[u8; 3]>>,
     wallpaper_accent: Option<Color32>,
     system_accent: Option<Color32>,
+    /// Desktop notifications as apps send them (`None` if the bus refused).
+    notifications: Option<NotificationWatcher>,
+    /// The notification the pill shows, and since when (egui time).
+    notice: Option<(Notification, f64)>,
     material: Applied,
     material_key: Option<(bool, bool, Material)>,
     /// Created lazily the first time the glass material is wanted.
@@ -117,12 +160,20 @@ pub struct NookApp {
     trimmed: bool,
     /// Window rect in physical pixels: (x, y, w, h).
     anchor: Option<(i32, i32, i32, i32)>,
+    /// Cursor y (physical px) and `cfg.notch_y` when a drag of the notch
+    /// began. The window moves under the pointer, so the vertical part is
+    /// measured on screen.
+    drag_y: Option<(i32, f32)>,
     activatable: bool,
     /// GitHub release checks and the in-place update.
     updater: Updater,
     /// The anonymous daily usage ping.
     stats: Stats,
     _instance: InstanceGuard,
+    /// `--hotkey=<id>` this launch was started with (a GNOME shortcut while
+    /// Nook was not running).
+    #[cfg(target_os = "linux")]
+    pending_hotkey: Option<String>,
     #[cfg(feature = "debug-overlay")]
     overlay: crate::overlay::DebugOverlay,
 }
@@ -138,6 +189,8 @@ impl NookApp {
 
         let hwnd = match cc.window_handle().context("window handle")?.as_raw() {
             RawWindowHandle::Win32(h) => Hwnd::from_raw(h.hwnd.get()),
+            RawWindowHandle::Xlib(h) => Hwnd::from_raw(h.window as isize),
+            RawWindowHandle::Xcb(h) => Hwnd::from_raw(h.window.get() as isize),
             other => anyhow::bail!("unexpected window handle {other:?}"),
         };
         window::ensure_overlay(hwnd, false).context("overlay window styles")?;
@@ -173,6 +226,12 @@ impl NookApp {
 
         let (accent_tx, accent_rx) = unbounded();
         spawn_wallpaper_accent(accent_tx.clone(), ctx.clone());
+        let notifications = {
+            let ctx = ctx.clone();
+            NotificationWatcher::spawn(move || ctx.request_repaint())
+                .map_err(|e| tracing::warn!("notifications: {e}"))
+                .ok()
+        };
 
         nook_modules::plugins::set_dev_mode(cfg.plugin_dev);
         let mut registry = Registry::default();
@@ -204,6 +263,7 @@ impl NookApp {
         let timings = timings(&cfg);
         let mut shell = Shell::new(ShellMetrics::default(), timings);
         shell.placement = cfg.placement;
+        shell.free_x = cfg.notch_x;
         // Dev flags (screenshots/demos): `--pinned` starts expanded and
         // pinned, `--settings` additionally opens the settings page.
         // `--page=<module id>` opens that module's page.
@@ -253,6 +313,8 @@ impl NookApp {
             accent_tx,
             accent_rx,
             wallpaper_accent: None,
+            notifications,
+            notice: None,
             system_accent: system::system_accent()
                 .ok()
                 .map(|[r, g, b]| Color32::from_rgb(r, g, b)),
@@ -269,21 +331,21 @@ impl NookApp {
             collapsed_since: None,
             trimmed: false,
             anchor: None,
+            drag_y: None,
             activatable: false,
             updater,
             stats,
             _instance: instance,
+            #[cfg(target_os = "linux")]
+            pending_hotkey: crate::shortcuts::requested(),
             #[cfg(feature = "debug-overlay")]
             overlay: Default::default(),
         })
     }
 
+    /// The system's appearance (`cfg.theme` is no longer offered).
     fn dark(&self) -> bool {
-        match self.cfg.theme {
-            ThemeMode::Dark => true,
-            ThemeMode::Light => false,
-            ThemeMode::Auto => !self.sys.light_theme,
-        }
+        !self.sys.light_theme
     }
 
     fn accent(&self) -> Color32 {
@@ -412,15 +474,19 @@ impl NookApp {
         self.save_config();
     }
 
-    /// Spans the window across the top of the target monitor's work area.
-    /// The shell positions itself inside it (left, center or right).
+    /// Spans the window across the top of the target monitor's work area,
+    /// `cfg.notch_y` below it if the notch was dragged down (kept so the
+    /// open panel still fits on the monitor). The shell positions itself
+    /// inside it (left, center, right or where it was dragged).
     fn anchor_window(&mut self) {
         let Some(mon) = self.sys.monitor else {
             return;
         };
         let scale = window::dpi(self.hwnd) as f32 / 96.0;
         let h = (self.shell.window_size().y * scale).ceil() as i32;
-        let rect = (mon.work.left, mon.work.top, mon.work.width(), h);
+        let room = (mon.work.height() - h).max(0);
+        let dy = ((self.cfg.notch_y * scale).round() as i32).clamp(0, room);
+        let rect = (mon.work.left, mon.work.top + dy, mon.work.width(), h);
         if self.anchor != Some(rect) {
             match window::set_rect(self.hwnd, rect.0, rect.1, rect.2, rect.3) {
                 Ok(()) => {
@@ -435,6 +501,36 @@ impl NookApp {
     /// Lets clicks through everywhere except on the shell (and keeps input
     /// while a button pressed on it is held). The hit tester decides; the window
     /// style can only be changed safely from this thread.
+    /// Follows a drag of the notch: the shell moves itself along the edge,
+    /// this moves the window down with the pointer and saves the drop.
+    fn follow_drag(&mut self, drag: Option<ShellDrag>) {
+        let Some(drag) = drag else {
+            return;
+        };
+        let scale = window::dpi(self.hwnd) as f32 / 96.0;
+        let cursor_y = nook_platform::monitor::cursor_pos().ok().map(|(_, y)| y);
+        if let ShellDrag::Started { moved } = drag {
+            // From the press: the pointer has already crossed the drag
+            // threshold (the window has not moved yet).
+            let pressed_at = |y: i32| y - (moved.y * scale).round() as i32;
+            self.drag_y = cursor_y.map(|y| (pressed_at(y), self.cfg.notch_y));
+        }
+        if let (Some((y0, from)), Some(y)) = (self.drag_y, cursor_y) {
+            let room = self.sys.monitor.map_or(0.0, |m| {
+                (m.work.height() as f32 / scale - self.shell.window_size().y).max(0.0)
+            });
+            let y = (from + (y - y0) as f32 / scale).clamp(0.0, room);
+            // Back against the top edge within a few points.
+            self.cfg.notch_y = if y < 8.0 { 0.0 } else { y.round() };
+        }
+        if drag == ShellDrag::Ended {
+            self.drag_y = None;
+            self.cfg.placement = self.shell.placement;
+            self.cfg.notch_x = self.shell.free_x;
+            self.save_config();
+        }
+    }
+
     fn apply_click_through(&mut self) {
         let through = !self.hit.as_ref().is_none_or(HitTester::inside);
         // Checked against the real style every frame (one read, a write only
@@ -702,6 +798,96 @@ fn icon_font(size: f32, fill: bool) -> FontId {
     FontId::new(size, FontFamily::Name(family.into()))
 }
 
+/// Size of the pill while it shows a notification.
+const NOTICE_PILL: Vec2 = vec2(340.0, 34.0);
+/// How long a notification stays in the pill.
+const NOTICE_SECS: f64 = 6.0;
+
+impl NookApp {
+    /// The newest notification still due in the pill. Each new one
+    /// restarts the time; the panel being open shows none (it would only
+    /// come back once the panel closes, stale).
+    fn current_notice(&mut self, ctx: &egui::Context) -> Option<Notification> {
+        let now = ctx.input(|i| i.time);
+        if let Some(n) = self
+            .notifications
+            .as_ref()
+            .and_then(|w| w.poll().into_iter().last())
+        {
+            self.notice = Some((n, now));
+        }
+        if self.shell.state.is_open() {
+            self.notice = None;
+        }
+        let (n, at) = self.notice.as_ref()?;
+        let left = at + NOTICE_SECS - now;
+        if left <= 0.0 {
+            self.notice = None;
+            return None;
+        }
+        ctx.request_repaint_after(Duration::from_secs_f64(left));
+        Some(n.clone())
+    }
+}
+
+/// The pill while a notification shows: a bell, the app's name, then the
+/// summary and as much of the body as fits, on one line.
+fn draw_notice(n: &Notification, ui: &mut Ui, rect: Rect, theme: &Theme) {
+    const PAD: f32 = 15.0;
+    let painter = ui.painter();
+    let cy = rect.center().y;
+    let bell = ink_text(
+        painter,
+        icons_fill::BELL_SIMPLE,
+        icon_font(14.0, true),
+        theme.accent_fg(),
+        rect.min.x + PAD,
+        cy,
+        false,
+    );
+    let mut x = bell.max.x + 8.0;
+    let max_x = rect.max.x - PAD;
+    let line = |text: &str, font: FontId, color: Color32, x: &mut f32| {
+        if text.is_empty() || *x >= max_x - 8.0 {
+            return;
+        }
+        let mut job = egui::text::LayoutJob::single_section(
+            text.to_owned(),
+            egui::TextFormat::simple(font, color),
+        );
+        job.wrap = egui::text::TextWrapping {
+            max_width: max_x - *x,
+            max_rows: 1,
+            break_anywhere: true,
+            overflow_character: Some('…'),
+        };
+        let galley = painter.layout_job(job);
+        let w = galley.size().x;
+        painter.galley(pos2(*x, cy - galley.size().y * 0.5), galley, color);
+        *x += w + 6.0;
+    };
+    let app = if n.app.is_empty() {
+        n.summary.as_str()
+    } else {
+        n.app.as_str()
+    };
+    line(
+        app,
+        Theme::font(SIZE_LABEL + 1.0),
+        theme.pill_text_dim,
+        &mut x,
+    );
+    if !n.app.is_empty() {
+        line(
+            &n.summary,
+            Theme::font_semibold(SIZE_BODY),
+            theme.pill_text,
+            &mut x,
+        );
+    }
+    line(&n.body, Theme::font(SIZE_BODY), theme.pill_text_dim, &mut x);
+}
+
 /// Collapsed pill: live badges from modules (ring + label on the left,
 /// glyphs and pulse dots on the right), inset by the same ink margin on
 /// both sides.
@@ -859,6 +1045,35 @@ fn timings(cfg: &Config) -> ShellTimings {
 
 fn register_hotkeys(cfg: &Config, registry: &Registry, ctx: &egui::Context) -> Result<Hotkeys> {
     let manager = GlobalHotKeyManager::new().context("creating hotkey manager")?;
+    #[cfg(target_os = "linux")]
+    if crate::shortcuts::use_desktop() {
+        let mut desktop = DesktopShortcuts {
+            wanted: Vec::new(),
+            rx: crate::shortcuts::serve(ctx),
+        };
+        desktop.set(
+            crate::shortcuts::TOGGLE,
+            "Open the panel",
+            &cfg.toggle_hotkey,
+        );
+        let (_tx, rx) = unbounded();
+        let mut hotkeys = Hotkeys {
+            manager,
+            toggle_id: None,
+            modules: Vec::new(),
+            rx,
+            desktop: Some(desktop),
+        };
+        for m in registry.all() {
+            if let (Some(accel), Some(d)) = (m.default_hotkey(), &mut hotkeys.desktop) {
+                d.set(m.id(), m.name(), accel);
+            }
+        }
+        if let Some(d) = &hotkeys.desktop {
+            crate::shortcuts::sync(d.wanted.clone());
+        }
+        return Ok(hotkeys);
+    }
     let toggle_id = match HotKey::from_str(&cfg.toggle_hotkey) {
         Ok(hk) => match manager.register(hk) {
             Ok(()) => Some(hk.id()),
@@ -884,6 +1099,8 @@ fn register_hotkeys(cfg: &Config, registry: &Registry, ctx: &egui::Context) -> R
         toggle_id,
         modules: Vec::new(),
         rx,
+        #[cfg(target_os = "linux")]
+        desktop: None,
     };
     for m in registry.all() {
         hotkeys.add_module(m);
@@ -933,6 +1150,23 @@ impl eframe::App for NookApp {
                 {
                     self.stats.tool(id);
                     m.on_hotkey();
+                }
+            }
+            // GNOME shortcuts arrive by id (and the one Nook was started
+            // with, if any).
+            #[cfg(target_os = "linux")]
+            {
+                let mut ids: Vec<String> = self.pending_hotkey.take().into_iter().collect();
+                if let Some(rx) = hk.desktop.as_ref().and_then(|d| d.rx.as_ref()) {
+                    ids.extend(rx.try_iter());
+                }
+                for id in ids {
+                    if id == crate::shortcuts::TOGGLE {
+                        toggle = !toggle;
+                    } else if let Some(m) = self.registry.get_mut(&id) {
+                        self.stats.tool(m.id());
+                        m.on_hotkey();
+                    }
                 }
             }
             if toggle {
@@ -1025,6 +1259,8 @@ impl eframe::App for NookApp {
             .filter_map(|m| m.collapsed_badge())
             .collect();
         let battery = self.sys.battery;
+        let notice = self.current_notice(&ctx);
+        self.shell.collapsed_override = notice.as_ref().map(|_| NOTICE_PILL);
         let composited = self.backdrop.is_some();
         // Stay open while typing in the panel (and the window has focus) or
         // while files are dragged over it.
@@ -1039,7 +1275,10 @@ impl eframe::App for NookApp {
             &theme,
             hidden,
             composited,
-            |ui, rect, _alpha| draw_pill(badges, battery, ui, rect, &theme),
+            |ui, rect, _alpha| match &notice {
+                Some(n) => draw_notice(n, ui, rect, &theme),
+                None => draw_pill(badges, battery, ui, rect, &theme),
+            },
             |ui, cctx| match page {
                 Page::Bento => {
                     let mut tiles = registry.grid_mut(editing);
@@ -1088,6 +1327,7 @@ impl eframe::App for NookApp {
             },
         );
 
+        self.follow_drag(out.drag);
         if let Some(id) = clicked {
             self.stats.tool(id);
         }
@@ -1132,6 +1372,7 @@ impl eframe::App for NookApp {
         if settings_out.changed {
             self.shell.timings = timings(&self.cfg);
             self.shell.placement = self.cfg.placement;
+            self.shell.free_x = self.cfg.notch_x;
             self.watcher.set_monitor_mode(self.cfg.monitor);
             nook_modules::plugins::set_dev_mode(self.cfg.plugin_dev);
             self.stats.set_enabled(self.cfg.usage_stats);

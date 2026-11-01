@@ -18,7 +18,9 @@ use crate::module::{Badge, GridTile, Module, ModuleStatus, TileCtx};
 use crate::paint;
 use crate::shell::ContentCtx;
 use crate::spring::SpringParams;
-use crate::theme::{self, SIZE_ICON, SIZE_LABEL, TILE_PADDING, TILE_RADIUS, Theme, with_alpha};
+use crate::theme::{
+    self, SIZE_CAPTION, SIZE_ICON, SIZE_LABEL, TILE_PADDING, TILE_RADIUS, Theme, with_alpha,
+};
 use egui::emath::TSTransform;
 use egui::{Align2, Area, Color32, Id, Order, Rect, Sense, Ui, UiBuilder, Vec2, pos2, vec2};
 
@@ -121,26 +123,31 @@ fn is_compact(tile: &GridTile<'_>) -> bool {
     tile.module.status() == ModuleStatus::Ready && tile.size.area() < tile.module.size_hint().area()
 }
 
-/// Glass tile background: gradient, rim and highlight, with hover glow.
+/// Tile background. Tiles are the content layer under the glass shell, so
+/// they are plain, near-opaque surfaces: a hairline edge, and a slightly
+/// lighter fill on hover as the pointer's feedback.
 fn tile_glass(painter: &egui::Painter, rect: Rect, theme: &Theme, active: bool, lift: f32) {
     let shape = Squircle::new(rect, TILE_RADIUS);
     let outline = shape.outline();
-    if lift > 0.01 {
-        paint::glow(painter, &shape, theme.accent, lift * 0.6);
-    }
     let (top, bottom) = if active {
         theme.active_tile()
     } else {
         (theme.tile_top, theme.tile_bottom)
     };
-    // Hover brightens the top of the gradient a touch.
-    let top = theme::mix(top, with_alpha(theme.text, 0.16), lift * 0.4);
+    // Hover tints toward the text color (lighter in dark, darker in
+    // light), keeping the fill's opacity.
+    let t = lift * if theme.dark { 0.06 } else { 0.035 };
+    let tint = |c: Color32| {
+        let a = c.a();
+        let [r, g, b, _] = theme::mix(c, theme.text, t).to_srgba_unmultiplied();
+        Color32::from_rgba_unmultiplied(r, g, b, a)
+    };
+    let (top, bottom) = (tint(top), tint(bottom));
     paint::fill_gradient(painter, &outline, top, bottom);
     painter.add(egui::epaint::PathShape::closed_line(
         outline,
         egui::epaint::PathStroke::new(1.0, theme.tile_rim),
     ));
-    paint::top_highlight(painter, &shape, with_alpha(theme.highlight, 0.5));
 }
 
 fn tile_inner(rect: Rect, size: TileSize) -> Rect {
@@ -258,8 +265,11 @@ pub fn show(
     let gutter_y = grid.max.y + (cctx.panel.max.y - grid.max.y) * 0.5 - 1.0;
     {
         let c = pos2(grid.min.x + 8.0, gutter_y);
-        let hit = Rect::from_center_size(c, vec2(22.0, 18.0));
+        // 24 x 20: the desktop minimum target is 20 x 20 (HIG, Accessibility).
+        let hit = Rect::from_center_size(c, vec2(24.0, 20.0));
         let resp = ui.interact(hit, Id::new("nook-bento-edit"), Sense::click());
+        let name = if editing { "Done" } else { "Edit the layout" };
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
         let (glyph, color) = if editing {
             (icons::CHECK, theme.accent_fg())
         } else if resp.hovered() {
@@ -275,10 +285,7 @@ pub fn show(
             with_alpha(color, cctx.alpha),
             editing,
         );
-        if resp
-            .on_hover_text(if editing { "Done" } else { "Edit the layout" })
-            .clicked()
-        {
+        if resp.on_hover_text(name).clicked() {
             out.toggle_edit = true;
         }
     }
@@ -445,6 +452,15 @@ pub fn show(
                     // layer under the pointer and nothing in it hovers.
                     ui.expand_to_include_rect(rect);
                     let resp = ui.interact(rect, id.with("tile"), sense);
+                    // Icon-only tiles show their name only on hover; screen
+                    // readers get it always.
+                    resp.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            interactive,
+                            tile.module.name(),
+                        )
+                    });
                     let hovered = interactive && ui.rect_contains_pointer(rect);
                     let pressed = hovered && ctx.input(|i| i.pointer.primary_down());
                     if hovered && drag.is_none() {
@@ -481,6 +497,14 @@ pub fn show(
                     }
                     let active = ready && !editing && tile.module.is_active();
                     tile_glass(&painter, rect, theme, active, lift);
+                    if resp.has_focus() && crate::widgets::keyboard_navigating(&ctx) {
+                        painter.rect_stroke(
+                            rect.expand(2.0),
+                            TILE_RADIUS + 2.0,
+                            egui::Stroke::new(2.0, with_alpha(theme.accent, 0.85)),
+                            egui::StrokeKind::Outside,
+                        );
+                    }
                     if is_open {
                         painter.rect_stroke(
                             rect.shrink(0.5),
@@ -789,7 +813,7 @@ fn compact_tile(ui: &mut Ui, inner: Rect, module: &dyn Module, theme: &Theme, ho
                 inner.center() + vec2(0.0, 13.0),
                 Align2::CENTER_CENTER,
                 l,
-                Theme::font(SIZE_LABEL - 2.0),
+                Theme::font(SIZE_CAPTION),
                 theme.text_dim,
             );
         }

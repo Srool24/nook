@@ -9,8 +9,8 @@
 //! 2. The OCR engine (`crate::ocr`) reads that line, so we know what it
 //!    says.
 //! 3. The same text is drawn with every installed font family (regular,
-//!    bold and italic) through GDI, cropped to its ink and scaled to the
-//!    sample's size.
+//!    bold and italic) through GDI (fontconfig and `ab_glyph` on Linux),
+//!    cropped to its ink and scaled to the sample's size.
 //! 4. Each rendering is scored by how well its pixels line up with the
 //!    sample (normalized cross-correlation), times how close its proportions
 //!    are. The best families win.
@@ -21,8 +21,11 @@
 use crate::capture::Frame;
 use crate::{PlatformError, Result, fontnet, ocr};
 use image::{GrayImage, Luma, imageops};
+#[cfg(windows)]
 use windows::Win32::Foundation::COLORREF;
+#[cfg(windows)]
 use windows::Win32::Foundation::{LPARAM, RECT, SIZE};
+#[cfg(windows)]
 use windows::Win32::Graphics::Gdi::{
     ANTIALIASED_QUALITY, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC,
     CreateDIBSection, CreateFontIndirectW, DEFAULT_CHARSET, DIB_RGB_COLORS, DT_NOCLIP, DT_NOPREFIX,
@@ -216,8 +219,32 @@ fn correlation(a: &GrayImage, b: &GrayImage) -> f32 {
     (cov / (va * vb).sqrt()) as f32
 }
 
+/// Installed font families that can draw text (no symbol or emoji fonts),
+/// sorted and without duplicates.
+#[cfg(target_os = "linux")]
+pub fn families() -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for face in crate::sys::fonts::installed() {
+        if names
+            .last()
+            .is_some_and(|n| n.eq_ignore_ascii_case(&face.family))
+        {
+            continue;
+        }
+        let lower = face.family.to_lowercase();
+        if lower.contains("emoji") || lower.contains("symbol") || lower.contains("dingbat") {
+            continue;
+        }
+        names.push(face.family.clone());
+    }
+    names.sort_by_key(|n| n.to_lowercase());
+    names.dedup();
+    names
+}
+
 /// Installed font families that can draw text (no vertical `@` faces, no
 /// symbol fonts), sorted and without duplicates.
+#[cfg(windows)]
 pub fn families() -> Vec<String> {
     unsafe extern "system" fn collect(
         lf: *const LOGFONTW,
@@ -264,7 +291,54 @@ pub fn families() -> Vec<String> {
 }
 
 /// Draws `text` in `family` (white on black) and returns its ink, cropped
+/// to the glyphs. Bold and italic the family lacks are faked like GDI does:
+/// a horizontal smear and a slant.
+#[cfg(target_os = "linux")]
+fn render(text: &[u16], family: &str, style: FontStyle) -> Option<GrayImage> {
+    use ab_glyph::Font;
+    let text = String::from_utf16_lossy(text);
+    let face =
+        crate::sys::fonts::styled(family, style == FontStyle::Bold, style == FontStyle::Italic)?;
+    // A face without these letters (a script-only Noto family, a symbol
+    // font) would only draw boxes.
+    if text
+        .chars()
+        .any(|c| c.is_alphanumeric() && face.font.glyph_id(c).0 == 0)
+    {
+        return None;
+    }
+    let line = crate::sys::fonts::layout(&face.font, &text, RENDER_PX as f32);
+    let margin = RENDER_PX / 2;
+    let (bw, bh) = (
+        line.width.ceil() as i32 + 2 * margin,
+        line.height.ceil() as i32 + 2 * margin,
+    );
+    if line.width <= 0.0 || bw > 8000 {
+        return None;
+    }
+    let (w, h) = (bw as usize, bh as usize);
+    let mut ink = vec![0.0f32; w * h];
+    let embolden = if face.fake_bold { RENDER_PX / 24 } else { 0 };
+    let slant = if face.fake_italic { 0.2 } else { 0.0 };
+    let base = margin as f32 + line.height * 0.8;
+    line.draw(|x, y, c| {
+        let (py, px) = (y + margin, x + margin);
+        let shift = ((base - py as f32) * slant).round() as i32;
+        for dx in 0..=embolden {
+            let qx = px + shift + dx;
+            if qx >= 0 && py >= 0 && (qx as usize) < w && (py as usize) < h {
+                let i = py as usize * w + qx as usize;
+                ink[i] = (ink[i] + c).min(1.0);
+            }
+        }
+    });
+    let bbox = ink_bbox(&ink, w, h)?;
+    Some(to_gray(&ink, w, bbox))
+}
+
+/// Draws `text` in `family` (white on black) and returns its ink, cropped
 /// to the glyphs.
+#[cfg(windows)]
 fn render(text: &[u16], family: &str, style: FontStyle) -> Option<GrayImage> {
     let mut face = [0u16; 32];
     for (d, s) in face.iter_mut().take(31).zip(family.encode_utf16()) {
@@ -792,6 +866,7 @@ mod tests {
     /// `cargo test -p nook-platform --release eval_fonts -- --ignored --nocapture`
     #[test]
     #[ignore]
+    #[cfg(windows)]
     fn eval_fonts() {
         use windows::Win32::Graphics::Gdi::{
             AddFontResourceExW, FR_PRIVATE, RemoveFontResourceExW,

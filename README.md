@@ -1,6 +1,7 @@
 # Nook
 
-A floating notch for Windows 10/11. A small glass pill sits at the top
+A floating notch for Windows 10/11 and Linux (Fedora GNOME, see
+[docs/LINUX.md](docs/LINUX.md)). A small glass pill sits at the top
 of the screen (center, or either corner). Hover it and it springs open into a bento grid of
 utilities. Move away and it folds back. It idles at 0% CPU.
 
@@ -21,6 +22,14 @@ Get `Nook-Setup-<version>.exe` from
 it. Windows 10 or 11, 64-bit; no admin rights needed. The installer isn't
 code-signed yet, so SmartScreen may say "Windows protected your PC": click
 **More info**, then **Run anyway**.
+
+## Linux
+
+Fedora Workstation (GNOME on Wayland) runs every tool. Build an RPM with
+`packaging/linux/build-rpm.sh`, or install for your user with
+`packaging/linux/install.sh --deps && packaging/linux/install.sh`. How each
+Windows API maps to Linux, the GNOME shortcuts and the known differences
+are in [docs/LINUX.md](docs/LINUX.md).
 
 ## Build and run
 
@@ -150,6 +159,10 @@ npx wrangler@4.153.0 d1 execute nook-stats --remote --file migrations/0002_usage
   **Pin open** to keep the panel open. A small pin shows at the top center.
 - **Position:** Settings, Position: Left, Center or Right. In a corner
   the panel opens toward the other side.
+- **Drag** the glass to move the notch anywhere on the screen; the panel
+  opens around it and stays on the monitor. Drop it near the left corner,
+  the center or the right corner of the top edge and it snaps there.
+  Picking a Position in Settings puts it back on the top edge.
 - **Always on top:** on by default. Turn it off in Settings or the tray
   to keep Nook behind your windows (it still shows on the desktop).
   Ctrl+Alt+N brings it back on top.

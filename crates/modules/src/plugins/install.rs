@@ -485,12 +485,11 @@ fn preview(source: &Source, expect: Option<&str>) -> Result<Manifest, String> {
     Ok(m)
 }
 
-/// `%APPDATA%\Nook\plugins`, created if needed.
+/// `%APPDATA%\Nook\plugins` (`~/.config/nook/plugins` on Linux), created
+/// if needed.
 pub fn plugins_root() -> PathBuf {
-    let base = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    let dir = base.join("Nook").join("plugins");
+    let base = nook_platform::shell::app_dir().unwrap_or_else(|| std::env::temp_dir().join("Nook"));
+    let dir = base.join("plugins");
     let _ = std::fs::create_dir_all(&dir);
     dir
 }
@@ -607,10 +606,20 @@ fn unpack(zip: &[u8], path: &str, into: &Path) -> Result<(), String> {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("creating {}: {e}", parent.display()))?;
         }
+        let executable = entry.unix_mode().is_some_and(|m| m & 0o111 != 0);
         let mut f =
             std::fs::File::create(&out).map_err(|e| format!("writing {}: {e}", rel.display()))?;
         std::io::copy(&mut (&mut entry).take(MAX_UNPACKED), &mut f)
             .map_err(|e| format!("writing {}: {e}", rel.display()))?;
+        // Scripts and binaries keep their executable bit (GitHub archives
+        // record it).
+        #[cfg(unix)]
+        if executable {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o755));
+        }
+        #[cfg(not(unix))]
+        let _ = executable;
     }
     if files == 0 {
         return Err(if path.is_empty() {

@@ -19,7 +19,7 @@ use egui::{
 use nook_platform::files::{self, DropResult};
 use nook_platform::{shell, window};
 use nook_ui::module::{Badge, Module, TileCtx, TileSize};
-use nook_ui::theme::{SIZE_ICON, SIZE_LABEL, Theme, with_alpha};
+use nook_ui::theme::{SIZE_CAPTION, SIZE_ICON, SIZE_LABEL, Theme, with_alpha};
 use nook_ui::{anim, icons, paint, widgets};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -74,7 +74,7 @@ pub(crate) fn human_size(bytes: u64) -> String {
 }
 
 fn shelf_file() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("Nook").join("shelf.txt"))
+    shell::app_dir().map(|d| d.join("shelf.txt"))
 }
 
 /// Paths on the shelf from `text` (one per line), dropping blanks.
@@ -412,7 +412,7 @@ impl Module for FileShelf {
                 c,
                 Align2::CENTER_CENTER,
                 count.min(99),
-                Theme::font_semibold(SIZE_LABEL - 2.0),
+                Theme::font_semibold(SIZE_CAPTION),
                 Color32::WHITE,
             );
         }

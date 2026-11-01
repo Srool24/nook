@@ -6,7 +6,7 @@ use crate::geometry::Squircle;
 use crate::paint;
 use crate::spring::SpringParams;
 use crate::theme::{SIZE_LABEL, Theme, mix, with_alpha};
-use egui::{Align2, Color32, Response, Sense, Stroke, Ui, pos2, vec2};
+use egui::{Align, Align2, Color32, Response, Sense, Stroke, Ui, pos2, vec2};
 
 /// Size of [`toggle`].
 pub const TOGGLE_SIZE: egui::Vec2 = vec2(36.0, 22.0);
@@ -16,6 +16,7 @@ pub const TOGGLE_SIZE: egui::Vec2 = vec2(36.0, 22.0);
 /// pressed; the off track keeps a rim so the switch reads on any glass.
 pub fn toggle(ui: &mut Ui, on: &mut bool, theme: &Theme) -> Response {
     let (rect, mut resp) = ui.allocate_exact_size(TOGGLE_SIZE, Sense::click());
+    focus_ring(ui, &resp, rect, rect.height() * 0.5, theme);
     if resp.clicked() {
         *on = !*on;
         resp.mark_changed();
@@ -80,10 +81,26 @@ pub fn toggle(ui: &mut Ui, on: &mut bool, theme: &Theme) -> Response {
     resp
 }
 
+/// Where text starts: on the right when its first letter is Hebrew or
+/// Arabic, so text fields hold right-to-left writing against the right
+/// edge. Empty or neutral text (digits, punctuation) starts on the left.
+pub fn reading_align(text: &str) -> Align {
+    let rtl = |c: char| {
+        matches!(c as u32,
+            0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF | 0x1EE00..=0x1EEFF)
+    };
+    match text.chars().find(|c| c.is_alphabetic()) {
+        Some(c) if rtl(c) => Align::RIGHT,
+        _ => Align::LEFT,
+    }
+}
+
 /// Segmented control; the highlight slides between options on a spring.
 pub fn segmented(ui: &mut Ui, options: &[&str], selected: &mut usize, theme: &Theme) -> Response {
     let font = Theme::font(SIZE_LABEL);
-    let seg_w = options
+    // Equal segments (HIG, Segmented controls: "keep segment size
+    // consistent"), each as wide as the widest label plus padding.
+    let widest = options
         .iter()
         .map(|o| {
             ui.painter()
@@ -91,10 +108,17 @@ pub fn segmented(ui: &mut Ui, options: &[&str], selected: &mut usize, theme: &Th
                 .size()
                 .x
         })
-        .fold(0.0_f32, f32::max)
-        + 14.0;
-    let size = vec2(seg_w * options.len() as f32 + 4.0, 24.0);
+        .fold(0.0_f32, f32::max);
+    // Roomy padding when there's space, tighter (never under 4) when not.
+    let room = (ui.available_width() - 4.0) / options.len().max(1) as f32;
+    let widest = (widest + 12.0).min(room.max(widest + 4.0));
+    let widths = vec![widest; options.len()];
+    let lefts: Vec<f32> = (0..options.len())
+        .map(|i| 2.0 + widest * i as f32)
+        .collect();
+    let size = vec2(widths.iter().sum::<f32>() + 4.0, 24.0);
     let (rect, mut resp) = ui.allocate_exact_size(size, Sense::click());
+    focus_ring(ui, &resp, rect, rect.height() * 0.5, theme);
     let painter = ui.painter();
     let track = if theme.dark {
         Color32::from_white_alpha(14)
@@ -106,7 +130,8 @@ pub fn segmented(ui: &mut Ui, options: &[&str], selected: &mut usize, theme: &Th
     if resp.clicked()
         && let Some(p) = resp.interact_pointer_pos()
     {
-        let i = (((p.x - rect.min.x - 2.0) / seg_w).floor() as usize).min(options.len() - 1);
+        let x = p.x - rect.min.x;
+        let i = lefts.iter().rposition(|l| *l <= x).unwrap_or(0);
         if i != *selected {
             *selected = i;
             resp.mark_changed();
@@ -118,9 +143,17 @@ pub fn segmented(ui: &mut Ui, options: &[&str], selected: &mut usize, theme: &Th
         *selected as f32,
         SpringParams::critical(520.0),
     );
+    // The highlight slides between segments, resizing as it goes.
+    let last = options.len().saturating_sub(1);
+    let i0 = (pos.floor().max(0.0) as usize).min(last);
+    let i1 = (i0 + 1).min(last);
+    let f = (pos - i0 as f32).clamp(0.0, 1.0);
     let hl = egui::Rect::from_min_size(
-        pos2(rect.min.x + 2.0 + pos * seg_w, rect.min.y + 2.0),
-        vec2(seg_w, size.y - 4.0),
+        pos2(
+            rect.min.x + lefts[i0] + (lefts[i1] - lefts[i0]) * f,
+            rect.min.y + 2.0,
+        ),
+        vec2(widths[i0] + (widths[i1] - widths[i0]) * f, size.y - 4.0),
     );
     let hl_fill = if theme.dark {
         Color32::from_white_alpha(36)
@@ -128,8 +161,17 @@ pub fn segmented(ui: &mut Ui, options: &[&str], selected: &mut usize, theme: &Th
         Color32::WHITE
     };
     painter.rect_filled(hl, 10.0, hl_fill);
+    if !theme.dark {
+        // White on the light track is 1.1:1; an edge marks the selection.
+        painter.rect_stroke(
+            hl,
+            10.0,
+            Stroke::new(1.0, Color32::from_black_alpha(28)),
+            egui::StrokeKind::Inside,
+        );
+    }
     for (i, o) in options.iter().enumerate() {
-        let c = pos2(rect.min.x + 2.0 + seg_w * (i as f32 + 0.5), rect.center().y);
+        let c = pos2(rect.min.x + lefts[i] + widths[i] * 0.5, rect.center().y);
         let near = 1.0 - (pos - i as f32).abs().min(1.0);
         let color = mix(theme.text_dim, theme.text, near);
         painter.text(c, Align2::CENTER_CENTER, *o, font.clone(), color);
@@ -198,6 +240,7 @@ pub fn swatches(
     let n = colors.len() as f32;
     let size = vec2(n * D + (n - 1.0).max(0.0) * GAP, 22.0);
     let (rect, mut resp) = ui.allocate_exact_size(size, Sense::click());
+    focus_ring(ui, &resp, rect, rect.height() * 0.5, theme);
     let hovered = resp
         .hover_pos()
         .map(|p| (((p.x - rect.min.x) / (D + GAP)) as usize).min(colors.len() - 1));
@@ -239,7 +282,61 @@ pub fn swatches(
     resp
 }
 
-/// Round icon button with a hover wash and press scale.
+/// Focus moved by Tab since the last click. A click also focuses a widget
+/// in egui, and that shouldn't draw a ring.
+pub fn keyboard_navigating(ctx: &egui::Context) -> bool {
+    let id = egui::Id::new("nook-keyboard-nav");
+    let (tab, click) = ctx.input(|i| (i.key_pressed(egui::Key::Tab), i.pointer.any_pressed()));
+    ctx.data_mut(|d| {
+        let nav = d.get_temp_mut_or(id, false);
+        if tab {
+            *nav = true;
+        } else if click {
+            *nav = false;
+        }
+        *nav
+    })
+}
+
+/// The keyboard focus ring (macOS's keyboard focus indicator): an accent
+/// outline just outside `rect`, while `resp` has keyboard focus.
+pub fn focus_ring(ui: &Ui, resp: &Response, rect: egui::Rect, radius: f32, theme: &Theme) {
+    if resp.has_focus() && keyboard_navigating(ui.ctx()) {
+        ui.painter().rect_stroke(
+            rect.expand(2.0),
+            radius + 2.0,
+            Stroke::new(2.0, with_alpha(theme.accent, 0.85)),
+            egui::StrokeKind::Outside,
+        );
+    }
+}
+
+/// What a screen reader announces for an icon-only button, by its glyph.
+fn icon_name(glyph: &str) -> Option<&'static str> {
+    use crate::icons as i;
+    Some(match glyph {
+        i::ARROW_LEFT => "Back",
+        i::ARROWS_CLOCKWISE => "Refresh",
+        i::ARROW_COUNTER_CLOCKWISE => "Reset",
+        i::ARROW_SQUARE_OUT => "Open",
+        i::ARROW_U_UP_LEFT => "Undo",
+        i::BROOM => "Clear",
+        i::CHECK => "Done",
+        i::COPY => "Copy",
+        i::EYEDROPPER => "Pick a color",
+        i::FLOPPY_DISK => "Save",
+        i::FOLDER_OPEN => "Open folder",
+        i::PLUS => "New",
+        i::SELECTION => "Select an area",
+        i::TRASH => "Delete",
+        i::GEAR => "Settings",
+        i::X => "Close",
+        _ => return None,
+    })
+}
+
+/// Round icon button with a hover wash and press scale. Common glyphs get
+/// a name for screen readers (see [`icon_name`]).
 pub fn icon_button(
     ui: &mut Ui,
     glyph: &'static str,
@@ -248,6 +345,10 @@ pub fn icon_button(
     theme: &Theme,
 ) -> Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click());
+    focus_ring(ui, &resp, rect, rect.height() * 0.5, theme);
+    if let Some(name) = icon_name(glyph) {
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
+    }
     let hover = anim::spring(
         ui.ctx(),
         resp.id.with("hover"),
@@ -382,4 +483,49 @@ pub fn card(painter: &egui::Painter, rect: egui::Rect, theme: &Theme) {
         outline,
         egui::epaint::PathStroke::new(1.0, theme.tile_rim),
     ));
+}
+
+#[cfg(test)]
+mod reading_tests {
+    use super::*;
+
+    #[test]
+    fn right_to_left_text_aligns_right() {
+        assert_eq!(reading_align("שלום world"), Align::RIGHT);
+        assert_eq!(reading_align("123 مرحبا"), Align::RIGHT);
+        assert_eq!(reading_align("hello שלום"), Align::LEFT);
+        assert_eq!(reading_align(""), Align::LEFT);
+    }
+
+    #[test]
+    fn focus_ring_follows_the_keyboard_not_clicks() {
+        let ctx = egui::Context::default();
+        let frame = |events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            let mut nav = false;
+            let mut out = ctx.run_ui(input, |ui| nav = keyboard_navigating(ui.ctx()));
+            out.textures_delta.clear();
+            nav
+        };
+        assert!(!frame(vec![]));
+        let tab = egui::Event::Key {
+            key: egui::Key::Tab,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Default::default(),
+        };
+        assert!(frame(vec![tab]));
+        assert!(frame(vec![]), "stays on until a click");
+        let click = egui::Event::PointerButton {
+            pos: egui::pos2(1.0, 1.0),
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Default::default(),
+        };
+        assert!(!frame(vec![click]));
+    }
 }

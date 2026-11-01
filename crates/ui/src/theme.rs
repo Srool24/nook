@@ -11,6 +11,10 @@ pub const SPACE: f32 = 8.0;
 pub const TILE_RADIUS: f32 = 16.0;
 pub const TILE_PADDING: f32 = 12.0;
 
+/// Type scale after macOS's text styles: caption 10 (the smallest text
+/// drawn), subheadline 11, body 13. Contrast of the three text colors is
+/// held at 4.5:1 or more against both the tiles and the panel.
+pub const SIZE_CAPTION: f32 = 10.0;
 pub const SIZE_LABEL: f32 = 11.0;
 pub const SIZE_BODY: f32 = 13.0;
 pub const SIZE_BIG: f32 = 28.0;
@@ -47,7 +51,7 @@ impl Default for Look {
         Self {
             glass_opacity: 0.70,
             tint: None,
-            grain: 0.35,
+            grain: 0.0,
             grain_px: 1.0,
         }
     }
@@ -124,39 +128,46 @@ impl Theme {
             Self {
                 dark,
                 accent,
-                glass_top: with_alpha(tinted(Color32::from_rgb(34, 34, 40), 0.30), glass_alpha),
-                glass_bottom: with_alpha(tinted(Color32::from_rgb(18, 18, 22), 0.20), glass_alpha),
+                glass_top: with_alpha(tinted(Color32::from_rgb(36, 36, 40), 0.30), glass_alpha),
+                glass_bottom: with_alpha(tinted(Color32::from_rgb(24, 24, 27), 0.20), glass_alpha),
                 rim: Color32::from_rgba_unmultiplied(0, 0, 0, 110),
                 highlight: Color32::from_rgba_unmultiplied(255, 255, 255, 46),
                 noise_alpha: (grain * GRAIN_MAX_DARK).round() as u8,
                 grain_px,
-                tile_top: Color32::from_rgba_unmultiplied(255, 255, 255, 18),
-                tile_bottom: Color32::from_rgba_unmultiplied(255, 255, 255, 8),
-                tile_rim: Color32::from_rgba_unmultiplied(255, 255, 255, 14),
-                text: Color32::from_rgb(242, 242, 245),
-                text_dim: Color32::from_rgb(168, 168, 178),
-                text_faint: Color32::from_rgb(110, 110, 120),
+                // Tiles are content, not glass: a near-opaque raised gray
+                // (#2C2C2E), so text on them keeps its contrast whatever
+                // shows through the panel.
+                tile_top: Color32::from_rgba_unmultiplied(46, 46, 49, 235),
+                tile_bottom: Color32::from_rgba_unmultiplied(42, 42, 45, 235),
+                tile_rim: Color32::from_rgba_unmultiplied(255, 255, 255, 12),
+                // On #2C2C2E: 12.8:1, 6.3:1 and 5.1:1.
+                text: Color32::from_rgb(245, 245, 247),
+                text_dim: Color32::from_rgb(174, 174, 178),
+                text_faint: Color32::from_rgb(156, 156, 161),
                 ..ink.into_theme()
             }
         } else {
             Self {
                 dark,
                 accent,
-                glass_top: with_alpha(tinted(Color32::from_rgb(252, 252, 253), 0.14), glass_alpha),
+                glass_top: with_alpha(tinted(Color32::from_rgb(244, 244, 247), 0.14), glass_alpha),
                 glass_bottom: with_alpha(
-                    tinted(Color32::from_rgb(236, 236, 240), 0.20),
+                    tinted(Color32::from_rgb(230, 230, 235), 0.20),
                     glass_alpha,
                 ),
                 rim: Color32::from_rgba_unmultiplied(0, 0, 0, 40),
                 highlight: Color32::from_rgba_unmultiplied(255, 255, 255, 200),
                 noise_alpha: (grain * GRAIN_MAX_LIGHT).round() as u8,
                 grain_px,
-                tile_top: Color32::from_rgba_unmultiplied(255, 255, 255, 150),
-                tile_bottom: Color32::from_rgba_unmultiplied(255, 255, 255, 90),
-                tile_rim: Color32::from_rgba_unmultiplied(0, 0, 0, 14),
-                text: Color32::from_rgb(24, 24, 28),
-                text_dim: Color32::from_rgb(92, 92, 104),
-                text_faint: Color32::from_rgb(150, 150, 160),
+                // Near-opaque white tiles on the gray glass, as Control
+                // Center draws its modules.
+                tile_top: Color32::from_rgba_unmultiplied(255, 255, 255, 240),
+                tile_bottom: Color32::from_rgba_unmultiplied(252, 252, 253, 240),
+                tile_rim: Color32::from_rgba_unmultiplied(0, 0, 0, 12),
+                // On white: 16.8:1, 7.5:1 and 5.5:1 (4.7:1 on the panel).
+                text: Color32::from_rgb(29, 29, 31),
+                text_dim: Color32::from_rgb(84, 84, 89),
+                text_faint: Color32::from_rgb(104, 104, 109),
                 ..ink.into_theme()
             }
         }
@@ -188,12 +199,22 @@ impl Theme {
     }
 
     /// Accent readable as text/icon color on the current glass.
+    /// Lightened (dark theme) or darkened (light theme) just enough to
+    /// read at 4.5:1 on a tile, whatever color the wallpaper gave.
     pub fn accent_fg(&self) -> Color32 {
-        if self.dark {
-            mix(self.accent, Color32::WHITE, 0.25)
+        let (toward, start) = if self.dark {
+            (Color32::WHITE, 0.25)
         } else {
-            mix(self.accent, Color32::BLACK, 0.15)
+            (Color32::BLACK, 0.15)
+        };
+        let tile = opaque(self.tile_top);
+        let mut t = start;
+        let mut c = mix(self.accent, toward, t);
+        while contrast(c, tile) < 4.5 && t < 1.0 {
+            t += 0.05;
+            c = mix(self.accent, toward, t);
         }
+        c
     }
 
     pub fn font(size: f32) -> FontId {
@@ -251,6 +272,29 @@ impl Ink {
     }
 }
 
+/// The color with its alpha dropped.
+fn opaque(c: Color32) -> Color32 {
+    let [r, g, b, _] = c.to_srgba_unmultiplied();
+    Color32::from_rgb(r, g, b)
+}
+
+/// WCAG contrast ratio of two opaque colors, 1..=21.
+pub fn contrast(a: Color32, b: Color32) -> f32 {
+    fn luminance(c: Color32) -> f32 {
+        let lin = |v: u8| {
+            let v = v as f32 / 255.0;
+            if v <= 0.040_45 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * lin(c.r()) + 0.7152 * lin(c.g()) + 0.0722 * lin(c.b())
+    }
+    let (la, lb) = (luminance(a), luminance(b));
+    (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+}
+
 /// Multiplies a color's alpha (unmultiplied semantics).
 pub fn with_alpha(c: Color32, alpha: f32) -> Color32 {
     let [r, g, b, a] = c.to_srgba_unmultiplied();
@@ -283,21 +327,18 @@ pub fn to_hex(c: Color32) -> String {
 
 /// Installs the text and icon fonts.
 ///
-/// Text uses the system's Segoe UI (regular + semibold), whose digits are
-/// tabular by default; egui cannot switch OpenType features such as `tnum`,
-/// which rules out Inter's proportional default figures. If the files are
-/// missing, egui's bundled font is used. See docs/NOTES.md.
+/// Text uses the system's Segoe UI (regular + semibold) on Windows, whose
+/// digits are tabular by default; egui cannot switch OpenType features such
+/// as `tnum`, which rules out Inter's proportional default figures. On Linux
+/// the same rule picks Noto Sans (tabular by default, installed on Fedora),
+/// then DejaVu Sans, then whatever fontconfig calls `sans-serif`; GNOME's
+/// own Adwaita Sans is Inter-based and would make timer digits jitter. If
+/// nothing is found, egui's bundled font is used. See docs/NOTES.md.
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
-    let windir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
-    let load = |file: &str| std::fs::read(format!("{windir}\\Fonts\\{file}")).ok();
-
-    let regular = load("segoeui.ttf");
-    let semibold = load("seguisb.ttf");
-    if let Some(bytes) = regular {
-        fonts
-            .font_data
-            .insert("segoe".into(), FontData::from_owned(bytes).into());
+    let (regular, semibold) = system_text_fonts();
+    if let Some(data) = regular {
+        fonts.font_data.insert("segoe".into(), data.into());
         if let Some(list) = fonts.families.get_mut(&FontFamily::Proportional) {
             list.insert(0, "segoe".into());
         }
@@ -307,11 +348,26 @@ pub fn install_fonts(ctx: &egui::Context) {
         .get(&FontFamily::Proportional)
         .cloned()
         .unwrap_or_default();
-    if let Some(bytes) = semibold {
-        fonts
-            .font_data
-            .insert("segoe-semibold".into(), FontData::from_owned(bytes).into());
+    if let Some(data) = semibold {
+        fonts.font_data.insert("segoe-semibold".into(), data.into());
         semibold_family.insert(0, "segoe-semibold".into());
+    }
+    #[cfg(not(windows))]
+    for (i, (regular, semibold)) in script_fallbacks().into_iter().enumerate() {
+        let name = format!("script-{i}");
+        fonts.font_data.insert(name.clone(), regular.into());
+        if let Some(list) = fonts.families.get_mut(&FontFamily::Proportional) {
+            list.push(name.clone());
+        }
+        let bold = match semibold {
+            Some(data) => {
+                let bold = format!("{name}-semibold");
+                fonts.font_data.insert(bold.clone(), data.into());
+                bold
+            }
+            None => name,
+        };
+        semibold_family.push(bold);
     }
     fonts
         .families
@@ -324,6 +380,105 @@ pub fn install_fonts(ctx: &egui::Context) {
         egui_phosphor::Variant::Fill.font_bytes(),
     );
     ctx.set_fonts(fonts);
+}
+
+/// Regular and semibold text faces from the system, if found.
+#[cfg(windows)]
+fn system_text_fonts() -> (Option<FontData>, Option<FontData>) {
+    let windir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let load = |file: &str| {
+        std::fs::read(format!("{windir}\\Fonts\\{file}"))
+            .ok()
+            .map(FontData::from_owned)
+    };
+    (load("segoeui.ttf"), load("seguisb.ttf"))
+}
+
+/// Regular and semibold text faces from fontconfig, if found. A variable
+/// font (Fedora ships Noto Sans as one) is used for both, at the `wght`
+/// axis values 400 and 600. fontconfig reports a variable font's named
+/// instance as `instance << 16 | face`, and does not flag it as variable,
+/// so the face index is the low 16 bits and the axis is set whenever the
+/// font has one.
+#[cfg(not(windows))]
+fn system_text_fonts() -> (Option<FontData>, Option<FontData>) {
+    for family in ["Noto Sans", "DejaVu Sans", "sans-serif"] {
+        let regular = fc_match(family, "regular", 400.0);
+        if regular.is_some() {
+            return (regular, fc_match(family, "semibold", 600.0));
+        }
+    }
+    (None, None)
+}
+
+#[cfg(not(windows))]
+fn fc_match(family: &str, weight: &str, wght: f32) -> Option<FontData> {
+    let (found, file, index, _) = fc_query(&format!("{family}:weight={weight}"))?;
+    // fontconfig always answers; only take a substitute for the generic name.
+    if family != "sans-serif" && !found.eq_ignore_ascii_case(family) {
+        return None;
+    }
+    fc_load(&file, index, wght)
+}
+
+/// Family, file, face index and supported languages (`he|hu|...`) of the
+/// font fontconfig picks for `pattern`.
+#[cfg(not(windows))]
+fn fc_query(pattern: &str) -> Option<(String, String, u32, String)> {
+    let out = std::process::Command::new("fc-match")
+        .args(["-f", "%{family[0]}\n%{file}\n%{index}\n%{lang}", pattern])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut lines = text.lines();
+    let found = lines.next()?.trim().to_owned();
+    let file = lines.next()?.trim().to_owned();
+    let index: u32 = lines
+        .next()
+        .and_then(|i| i.trim().parse().ok())
+        .unwrap_or(0)
+        & 0xFFFF;
+    let langs = lines.next().unwrap_or("").trim().to_owned();
+    Some((found, file, index, langs))
+}
+
+#[cfg(not(windows))]
+fn fc_load(file: &str, index: u32, wght: f32) -> Option<FontData> {
+    let bytes = std::fs::read(file).ok()?;
+    let mut data = FontData::from_owned(bytes);
+    data.index = index;
+    if data.variation_axes().iter().any(|a| a.tag == "wght") {
+        data.tweak.coords = egui::epaint::text::VariationCoords::new([(b"wght", wght)]);
+    }
+    Some(data)
+}
+
+/// Regular and semibold faces for scripts the text face may lack, to fall
+/// back on glyph by glyph: Fedora's Noto Sans has no Hebrew or Arabic
+/// (Segoe UI has both), so typed Hebrew showed as boxes. Each face once,
+/// and only one that covers the language.
+#[cfg(not(windows))]
+fn script_fallbacks() -> Vec<(FontData, Option<FontData>)> {
+    let mut seen = Vec::new();
+    let mut faces = Vec::new();
+    for lang in ["he", "ar"] {
+        let Some((_, file, index, langs)) =
+            fc_query(&format!("sans-serif:lang={lang}:weight=regular"))
+        else {
+            continue;
+        };
+        if seen.contains(&file) || !langs.split('|').any(|l| l == lang) {
+            continue;
+        }
+        let Some(regular) = fc_load(&file, index, 400.0) else {
+            continue;
+        };
+        seen.push(file);
+        let semibold = fc_query(&format!("sans-serif:lang={lang}:weight=semibold"))
+            .and_then(|(_, file, index, _)| fc_load(&file, index, 600.0));
+        faces.push((regular, semibold));
+    }
+    faces
 }
 
 #[cfg(test)]
@@ -362,5 +517,27 @@ mod tests {
         // The solid material ignores the opacity setting.
         let t = Theme::styled(true, FALLBACK_ACCENT, false, &clear);
         assert_eq!(t.glass_top.to_srgba_unmultiplied()[3], 245);
+    }
+
+    #[test]
+    fn text_colors_meet_contrast_on_tiles() {
+        for dark in [true, false] {
+            let t = Theme::new(dark, FALLBACK_ACCENT, false);
+            let tile = opaque(t.tile_top);
+            for c in [t.text, t.text_dim, t.text_faint] {
+                assert!(contrast(c, tile) >= 4.5, "dark={dark} {c:?}");
+            }
+            for accent in [
+                FALLBACK_ACCENT,
+                Color32::from_rgb(255, 214, 10),
+                Color32::from_rgb(20, 20, 120),
+            ] {
+                let t = Theme::new(dark, accent, false);
+                assert!(
+                    contrast(t.accent_fg(), tile) >= 4.5,
+                    "dark={dark} {accent:?}"
+                );
+            }
+        }
     }
 }
