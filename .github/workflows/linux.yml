@@ -7,6 +7,8 @@ on:
     branches: [main, fedora-linux]
     tags: ["v*"]
   pull_request:
+  # To rebuild by hand when a push didn't start a run.
+  workflow_dispatch:
 
 permissions:
   contents: write
