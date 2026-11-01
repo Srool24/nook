@@ -181,6 +181,8 @@ pub struct PhoneLink {
     tab: Tab,
     connect_addr: String,
     pair_code: String,
+    /// QR pairing in progress (its code is on the device card).
+    qr: Option<adb::QrPairing>,
     toast: Option<(String, Instant)>,
     picker: Option<Receiver<Picked>>,
     /// Pass in which the page was last drawn.
@@ -222,6 +224,7 @@ impl Default for PhoneLink {
             owner: None,
             tab: Tab::default(),
             pair_code: String::new(),
+            qr: None,
             toast: None,
             picker: None,
             page_pass: None,
@@ -472,10 +475,21 @@ impl PhoneLink {
                 }
                 adb::Event::Message(m) => {
                     if m.contains("connected to") {
+                        if self.qr.is_some()
+                            && let Some(addr) = m.rsplit("connected to ").next()
+                        {
+                            self.connect_addr = addr.trim().to_owned();
+                        }
                         self.settings.wireless = self.connect_addr.trim().to_owned();
                         self.settings.save();
                     }
                     self.say(m);
+                }
+                adb::Event::QrDone(ok) => {
+                    self.qr = None;
+                    if ok {
+                        self.say("Phone connected over Wi-Fi");
+                    }
                 }
                 adb::Event::Unavailable => self.adb_missing = true,
             }
@@ -839,6 +853,10 @@ impl PhoneLink {
             }
             return;
         }
+        if self.qr.is_some() {
+            self.qr_card(ui, area, theme);
+            return;
+        }
         let Some(dev) = self.device().cloned() else {
             paint::icon(
                 &painter,
@@ -857,12 +875,26 @@ impl PhoneLink {
             lines(
                 ui,
                 pos2(area.min.x + 10.0, c.y + 10.0),
-                "Plug it in with USB and turn on USB debugging (Developer options), or connect over Wi-Fi in Setup.\n\nFiles work without this: open LocalSend on the phone.",
+                "Plug it in with USB and turn on USB debugging (Developer options), or pair over Wi-Fi with a QR code.\n\nFiles work without this: open LocalSend on the phone.",
                 area.width() - 20.0,
                 9,
                 Theme::font(SIZE_LABEL),
                 theme.text_dim,
             );
+            let b = Rect::from_center_size(pos2(c.x, area.max.y - 24.0), vec2(170.0, 30.0));
+            if !self.adb_missing
+                && button(
+                    ui,
+                    b,
+                    "Pair with QR code",
+                    Some(icons::QR_CODE),
+                    true,
+                    theme,
+                )
+                .clicked()
+            {
+                self.start_qr();
+            }
             return;
         };
         match dev.state {
@@ -1703,6 +1735,14 @@ impl PhoneLink {
                     }
                 });
                 dim(ui, "Android 11+: Developer options > Wireless debugging. Pair with the code's address, then connect to the address on the main screen.");
+                if ui
+                    .add_enabled(!self.adb_missing, egui::Button::new("Pair with QR code"))
+                    .on_hover_text("Shows a code to scan in Wireless debugging > Pair device with QR code")
+                    .clicked()
+                {
+                    self.start_qr();
+                    self.tab = Tab::default();
+                }
                 let usb = self.device().is_some_and(|d| d.state == DeviceState::Ready && !d.wireless());
                 if ui
                     .add_enabled(usb, egui::Button::new("Switch the USB phone to Wi-Fi"))
@@ -1737,6 +1777,67 @@ impl PhoneLink {
                     }
                 }
             });
+    }
+
+    /// Shows a pairing QR code on the device card and starts looking for
+    /// the phone that scans it.
+    fn start_qr(&mut self) {
+        if let (Some(a), Some(ctx)) = (&self.adb, &self.ctx) {
+            self.qr = Some(a.pair_qr(ctx.clone()));
+            self.say("Waiting for the phone to scan the code…");
+        }
+    }
+
+    /// The pairing QR code (dark on white, as scanners expect, in both
+    /// themes), what to do on the phone, and Cancel.
+    fn qr_card(&mut self, ui: &mut Ui, area: Rect, theme: &Theme) {
+        let Some(q) = &self.qr else {
+            return;
+        };
+        let Ok(code) = qrcodegen::QrCode::encode_text(&q.payload, qrcodegen::QrCodeEcc::Medium)
+        else {
+            self.qr = None;
+            return;
+        };
+        let painter = ui.painter().clone();
+        let n = code.size();
+        let quiet = 2;
+        let side = (area.height() - 92.0).clamp(96.0, 180.0);
+        let cell = (side / (n + 2 * quiet) as f32).floor().max(1.0);
+        let side = cell * (n + 2 * quiet) as f32;
+        let top = area.min.y + 6.0;
+        let frame = Rect::from_min_size(pos2(area.center().x - side * 0.5, top), vec2(side, side));
+        painter.rect_filled(frame, 8.0, Color32::WHITE);
+        let origin = frame.min + vec2(quiet as f32 * cell, quiet as f32 * cell);
+        for y in 0..n {
+            for x in 0..n {
+                if code.get_module(x, y) {
+                    painter.rect_filled(
+                        Rect::from_min_size(
+                            origin + vec2(x as f32 * cell, y as f32 * cell),
+                            vec2(cell, cell),
+                        ),
+                        0.0,
+                        Color32::BLACK,
+                    );
+                }
+            }
+        }
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(500));
+        lines(
+            ui,
+            pos2(area.min.x + 10.0, frame.max.y + 8.0),
+            "On the phone: Settings > Developer options > Wireless debugging > Pair device with QR code. Same Wi-Fi as this computer.",
+            area.width() - 20.0,
+            5,
+            Theme::font(SIZE_LABEL),
+            theme.text_dim,
+        );
+        let b = Rect::from_center_size(pos2(area.center().x, area.max.y - 18.0), vec2(110.0, 26.0));
+        if button(ui, b, "Cancel", None, false, theme).clicked() {
+            self.qr = None;
+        }
     }
 
     fn find_tools(&mut self) {

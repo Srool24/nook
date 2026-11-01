@@ -10,10 +10,16 @@
 //!   (`dumpsys notification --noredact`), key presses and app launches. It
 //!   polls notifications every few seconds while a phone is connected and
 //!   only wakes the UI when something changed.
+//! - QR pairing (Android 11+ Wireless debugging): the phone scans a code
+//!   naming an mDNS service and a password, advertises that service, and
+//!   [`QrPairing`] finds it through the server's mDNS browser
+//!   (`host:mdns:services`), pairs, and connects.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
@@ -105,6 +111,8 @@ pub enum Event {
     Notifications(String, Vec<Notif>),
     /// A one-line result to show the user ("Connected to ...").
     Message(String),
+    /// QR pairing ended: connected (true), or failed or timed out.
+    QrDone(bool),
     /// The adb server is not reachable and could not be started.
     Unavailable,
 }
@@ -112,6 +120,7 @@ pub enum Event {
 pub struct Adb {
     pub exe: Option<PathBuf>,
     tx: Sender<Cmd>,
+    events_tx: Sender<Event>,
     pub events: Receiver<Event>,
 }
 
@@ -122,19 +131,164 @@ impl Adb {
         let (ev_tx, events) = mpsc::channel();
         let (tx, rx) = mpsc::channel();
         let emit = Emitter {
-            tx: ev_tx,
+            tx: ev_tx.clone(),
             ctx: ctx.clone(),
         };
         let e = emit.clone();
         let adb = exe.clone();
         spawn("nook-adb-track", move || track(adb.as_deref(), &e));
         spawn("nook-adb-work", move || work(rx, &emit));
-        Self { exe, tx, events }
+        Self {
+            exe,
+            tx,
+            events_tx: ev_tx,
+            events,
+        }
     }
 
     pub fn send(&self, cmd: Cmd) {
         let _ = self.tx.send(cmd);
     }
+
+    /// Starts QR pairing: show [`QrPairing::payload`] as a QR code for the
+    /// phone to scan. Progress comes as `Message` events, the end as
+    /// `QrDone`. Dropping the handle stops the search.
+    pub fn pair_qr(&self, ctx: egui::Context) -> QrPairing {
+        let (name, password) = (format!("nook-{}", random_token(6)), random_token(10));
+        let payload = format!("WIFI:T:ADB;S:{name};P:{password};;");
+        let cancel = Arc::new(AtomicBool::new(false));
+        let stop = cancel.clone();
+        let emit = Emitter {
+            tx: self.events_tx.clone(),
+            ctx,
+        };
+        spawn("nook-adb-qr", move || {
+            let ok = qr_pair(&name, &password, &stop, &emit);
+            if !stop.load(Ordering::Relaxed) {
+                emit.emit(Event::QrDone(ok));
+            }
+        });
+        QrPairing { payload, cancel }
+    }
+}
+
+/// A QR pairing in progress; dropping it stops the search.
+pub struct QrPairing {
+    /// The text the QR code holds (`WIFI:T:ADB;S:<name>;P:<password>;;`).
+    pub payload: String,
+    cancel: Arc<AtomicBool>,
+}
+
+impl Drop for QrPairing {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
+/// `n` random characters from a set without look-alikes. Seeded by the
+/// standard library's per-process random hasher keys.
+fn random_token(n: usize) -> String {
+    use std::hash::{BuildHasher, Hasher};
+    const SET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
+    let state = std::collections::hash_map::RandomState::new();
+    (0..n)
+        .map(|i| {
+            let mut h = state.build_hasher();
+            h.write_usize(i);
+            h.write_u128(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_nanos()),
+            );
+            SET[(h.finish() % SET.len() as u64) as usize] as char
+        })
+        .collect()
+}
+
+/// One mDNS service the adb server sees: instance name, type, `ip:port`.
+#[derive(Debug, PartialEq, Eq)]
+struct MdnsService {
+    name: String,
+    kind: String,
+    addr: String,
+}
+
+/// `host:mdns:services` lines: `name<TAB>type<TAB>ip:port`.
+fn parse_mdns(block: &str) -> Vec<MdnsService> {
+    block
+        .lines()
+        .filter_map(|l| {
+            let mut f = l.split('\t').map(str::trim);
+            let (name, kind, addr) = (f.next()?, f.next()?, f.next()?);
+            addr.contains(':').then(|| MdnsService {
+                name: name.to_owned(),
+                kind: kind.trim_end_matches('.').to_owned(),
+                addr: addr.to_owned(),
+            })
+        })
+        .collect()
+}
+
+/// Waits (up to two minutes) for the phone to advertise `name`, pairs with
+/// `password`, then connects to the phone's debugging service.
+fn qr_pair(name: &str, password: &str, stop: &AtomicBool, emit: &Emitter) -> bool {
+    const PAIRING: &str = "_adb-tls-pairing._tcp";
+    const CONNECT: &str = "_adb-tls-connect._tcp";
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let wait = |what: &dyn Fn(&[MdnsService]) -> Option<String>| -> Option<String> {
+        while Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
+            if let Ok(block) = host("host:mdns:services")
+                && let Some(found) = what(&parse_mdns(&block))
+            {
+                return Some(found);
+            }
+            std::thread::sleep(Duration::from_millis(800));
+        }
+        None
+    };
+    let Some(pair_addr) = wait(&|list| {
+        list.iter()
+            .find(|s| s.kind == PAIRING && s.name == name)
+            .map(|s| s.addr.clone())
+    }) else {
+        if !stop.load(Ordering::Relaxed) {
+            emit.emit(Event::Message(
+                "No phone answered the QR code. Is it on the same Wi-Fi?".into(),
+            ));
+        }
+        return false;
+    };
+    emit.emit(Event::Message("Pairing…".into()));
+    match host(&format!("host:pair:{password}:{pair_addr}")) {
+        Ok(m) if m.contains("Successfully paired") => {}
+        Ok(m) => {
+            emit.emit(Event::Message(m.trim().to_owned()));
+            return false;
+        }
+        Err(e) => {
+            emit.emit(Event::Message(format!("Pairing failed: {e}")));
+            return false;
+        }
+    }
+    // The phone's debugging service has its own port, on the same address.
+    let ip = pair_addr
+        .rsplit_once(':')
+        .map_or("", |(ip, _)| ip)
+        .to_owned();
+    let Some(addr) = wait(&|list| {
+        list.iter()
+            .find(|s| s.kind == CONNECT && s.addr.rsplit_once(':').is_some_and(|(i, _)| i == ip))
+            .map(|s| s.addr.clone())
+    }) else {
+        emit.emit(Event::Message(
+            "Paired. Connect with the address on the phone's Wireless debugging screen".into(),
+        ));
+        return false;
+    };
+    let msg = host(&format!("host:connect:{addr}")).unwrap_or_else(|e| e.to_string());
+    let ok = msg.contains("connected");
+    emit.emit(Event::Message(msg.trim().to_owned()));
+    ok
 }
 
 #[derive(Clone)]
@@ -697,6 +851,21 @@ Current Notification Manager state:
         assert_eq!(n[1].text, "See you at 8?");
         assert_eq!(n[1].when, 1_700_000_000_000);
         assert_eq!(n[1].key, "0|com.whatsapp|1|null|10123");
+    }
+
+    #[test]
+    fn mdns_services_parse() {
+        let block = "nook-AB12CD\t_adb-tls-pairing._tcp.\t192.168.1.5:37011\n\
+                     adb-R5CT-x1\t_adb-tls-connect._tcp\t192.168.1.5:41234\n\
+                     garbage line\n";
+        let list = parse_mdns(block);
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].name, "nook-AB12CD");
+        assert_eq!(list[0].kind, "_adb-tls-pairing._tcp");
+        assert_eq!(list[1].addr, "192.168.1.5:41234");
+        let t = random_token(10);
+        assert_eq!(t.len(), 10);
+        assert!(t.chars().all(|c| c.is_ascii_alphanumeric()));
     }
 
     #[test]
