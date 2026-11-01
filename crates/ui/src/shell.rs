@@ -157,6 +157,9 @@ pub struct Shell {
     /// Expanded size wanted by the page on show (phone link), instead of
     /// `metrics.expanded`.
     pub expanded_override: Option<Vec2>,
+    /// Closed size wanted for now (a notification widens the pill), instead
+    /// of `metrics.collapsed`.
+    pub collapsed_override: Option<Vec2>,
     /// Height the OS window must keep: it grows as soon as a taller page
     /// opens, and shrinks only once the shell has settled back down.
     tall: f32,
@@ -181,6 +184,7 @@ impl Shell {
             free_x: None,
             hold_open: false,
             expanded_override: None,
+            collapsed_override: None,
             tall: metrics.expanded.y,
             id: Id::new("nook-shell"),
             outline: Vec::new(),
@@ -337,10 +341,11 @@ impl Shell {
 
         let open = targets.shell_open && !hidden;
         let expanded = self.expanded();
+        let closed = self.collapsed_override.unwrap_or(m.collapsed);
         let rest = if self.state.is_hovering_closed() {
-            m.collapsed + m.hover_swell
+            closed + m.hover_swell
         } else {
-            m.collapsed
+            closed
         };
         let shell_params = SpringParams::shell();
         let w = anim::spring_from(

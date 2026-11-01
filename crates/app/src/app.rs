@@ -10,12 +10,13 @@ use crate::update::{self, Updater};
 use crate::watcher::{self, SystemState, WatcherControl};
 use anyhow::{Context as _, Result};
 use crossbeam_channel::{Receiver, unbounded};
-use egui::{Color32, FontFamily, FontId, Rect, Ui, pos2, vec2};
+use egui::{Color32, FontFamily, FontId, Rect, Ui, Vec2, pos2, vec2};
 use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use nook_platform::backdrop::{Backdrop, Tint};
 use nook_platform::hittest::{HitShape, HitTester};
 use nook_platform::material::{self, Applied};
+use nook_platform::notifications::{Notification, NotificationWatcher};
 use nook_platform::single_instance::InstanceGuard;
 use nook_platform::system::Battery;
 use nook_platform::{Hwnd, startup, system, wallpaper, window};
@@ -23,10 +24,10 @@ use nook_ui::anim::{self, Motion};
 use nook_ui::bento;
 use nook_ui::geometry::Squircle;
 use nook_ui::module::{Badge, Module, Registry};
-use nook_ui::paint;
 use nook_ui::shell::{Shell, ShellDrag, ShellMetrics, ShellOutput};
 use nook_ui::shell_state::ShellTimings;
 use nook_ui::theme::{self, FALLBACK_ACCENT, SIZE_BODY, SIZE_LABEL, Theme};
+use nook_ui::{icons_fill, paint};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -132,6 +133,10 @@ pub struct NookApp {
     accent_rx: Receiver<Option<[u8; 3]>>,
     wallpaper_accent: Option<Color32>,
     system_accent: Option<Color32>,
+    /// Desktop notifications as apps send them (`None` if the bus refused).
+    notifications: Option<NotificationWatcher>,
+    /// The notification the pill shows, and since when (egui time).
+    notice: Option<(Notification, f64)>,
     material: Applied,
     material_key: Option<(bool, bool, Material)>,
     /// Created lazily the first time the glass material is wanted.
@@ -221,6 +226,12 @@ impl NookApp {
 
         let (accent_tx, accent_rx) = unbounded();
         spawn_wallpaper_accent(accent_tx.clone(), ctx.clone());
+        let notifications = {
+            let ctx = ctx.clone();
+            NotificationWatcher::spawn(move || ctx.request_repaint())
+                .map_err(|e| tracing::warn!("notifications: {e}"))
+                .ok()
+        };
 
         nook_modules::plugins::set_dev_mode(cfg.plugin_dev);
         let mut registry = Registry::default();
@@ -302,6 +313,8 @@ impl NookApp {
             accent_tx,
             accent_rx,
             wallpaper_accent: None,
+            notifications,
+            notice: None,
             system_accent: system::system_accent()
                 .ok()
                 .map(|[r, g, b]| Color32::from_rgb(r, g, b)),
@@ -785,6 +798,96 @@ fn icon_font(size: f32, fill: bool) -> FontId {
     FontId::new(size, FontFamily::Name(family.into()))
 }
 
+/// Size of the pill while it shows a notification.
+const NOTICE_PILL: Vec2 = vec2(340.0, 34.0);
+/// How long a notification stays in the pill.
+const NOTICE_SECS: f64 = 6.0;
+
+impl NookApp {
+    /// The newest notification still due in the pill. Each new one
+    /// restarts the time; the panel being open shows none (it would only
+    /// come back once the panel closes, stale).
+    fn current_notice(&mut self, ctx: &egui::Context) -> Option<Notification> {
+        let now = ctx.input(|i| i.time);
+        if let Some(n) = self
+            .notifications
+            .as_ref()
+            .and_then(|w| w.poll().into_iter().last())
+        {
+            self.notice = Some((n, now));
+        }
+        if self.shell.state.is_open() {
+            self.notice = None;
+        }
+        let (n, at) = self.notice.as_ref()?;
+        let left = at + NOTICE_SECS - now;
+        if left <= 0.0 {
+            self.notice = None;
+            return None;
+        }
+        ctx.request_repaint_after(Duration::from_secs_f64(left));
+        Some(n.clone())
+    }
+}
+
+/// The pill while a notification shows: a bell, the app's name, then the
+/// summary and as much of the body as fits, on one line.
+fn draw_notice(n: &Notification, ui: &mut Ui, rect: Rect, theme: &Theme) {
+    const PAD: f32 = 15.0;
+    let painter = ui.painter();
+    let cy = rect.center().y;
+    let bell = ink_text(
+        painter,
+        icons_fill::BELL_SIMPLE,
+        icon_font(14.0, true),
+        theme.accent_fg(),
+        rect.min.x + PAD,
+        cy,
+        false,
+    );
+    let mut x = bell.max.x + 8.0;
+    let max_x = rect.max.x - PAD;
+    let line = |text: &str, font: FontId, color: Color32, x: &mut f32| {
+        if text.is_empty() || *x >= max_x - 8.0 {
+            return;
+        }
+        let mut job = egui::text::LayoutJob::single_section(
+            text.to_owned(),
+            egui::TextFormat::simple(font, color),
+        );
+        job.wrap = egui::text::TextWrapping {
+            max_width: max_x - *x,
+            max_rows: 1,
+            break_anywhere: true,
+            overflow_character: Some('…'),
+        };
+        let galley = painter.layout_job(job);
+        let w = galley.size().x;
+        painter.galley(pos2(*x, cy - galley.size().y * 0.5), galley, color);
+        *x += w + 6.0;
+    };
+    let app = if n.app.is_empty() {
+        n.summary.as_str()
+    } else {
+        n.app.as_str()
+    };
+    line(
+        app,
+        Theme::font(SIZE_LABEL + 1.0),
+        theme.pill_text_dim,
+        &mut x,
+    );
+    if !n.app.is_empty() {
+        line(
+            &n.summary,
+            Theme::font_semibold(SIZE_BODY),
+            theme.pill_text,
+            &mut x,
+        );
+    }
+    line(&n.body, Theme::font(SIZE_BODY), theme.pill_text_dim, &mut x);
+}
+
 /// Collapsed pill: live badges from modules (ring + label on the left,
 /// glyphs and pulse dots on the right), inset by the same ink margin on
 /// both sides.
@@ -1156,6 +1259,8 @@ impl eframe::App for NookApp {
             .filter_map(|m| m.collapsed_badge())
             .collect();
         let battery = self.sys.battery;
+        let notice = self.current_notice(&ctx);
+        self.shell.collapsed_override = notice.as_ref().map(|_| NOTICE_PILL);
         let composited = self.backdrop.is_some();
         // Stay open while typing in the panel (and the window has focus) or
         // while files are dragged over it.
@@ -1170,7 +1275,10 @@ impl eframe::App for NookApp {
             &theme,
             hidden,
             composited,
-            |ui, rect, _alpha| draw_pill(badges, battery, ui, rect, &theme),
+            |ui, rect, _alpha| match &notice {
+                Some(n) => draw_notice(n, ui, rect, &theme),
+                None => draw_pill(badges, battery, ui, rect, &theme),
+            },
             |ui, cctx| match page {
                 Page::Bento => {
                     let mut tiles = registry.grid_mut(editing);

@@ -3,7 +3,8 @@
 //!
 //! The overlay is a borderless X11 window kept above others with
 //! `_NET_WM_STATE_ABOVE`, out of the taskbar and the window switcher with
-//! `_NET_WM_STATE_SKIP_TASKBAR`/`SKIP_PAGER`. Clicks outside the drawn shape
+//! `_NET_WM_STATE_SKIP_TASKBAR`/`SKIP_PAGER`, on every workspace with
+//! `_NET_WM_STATE_STICKY`. Clicks outside the drawn shape
 //! fall through because the window's SHAPE *input* region is set to the
 //! shape ([`set_input_shape`], fed by `hittest`); the X server then routes
 //! pointer events outside it to whatever is below, with no polling thread.
@@ -94,6 +95,26 @@ fn skip_taskbar(hwnd: Hwnd) -> Result<()> {
     Ok(())
 }
 
+/// Shows the window on every workspace, so the notch stays put when people
+/// switch between them: `_NET_WM_DESKTOP` "all desktops" (0xFFFFFFFF) and
+/// `_NET_WM_STATE_STICKY`, both of which Mutter honours.
+fn all_workspaces(hwnd: Hwnd) -> Result<()> {
+    const ALL: u32 = 0xFFFF_FFFF;
+    let x = x()?;
+    // Before mapping the window manager reads the property; after, it
+    // takes the request.
+    x.set_prop32(
+        hwnd.xid(),
+        x.atoms._NET_WM_DESKTOP,
+        AtomEnum::CARDINAL,
+        &[ALL],
+    );
+    x.client_message(hwnd.xid(), x.atoms._NET_WM_DESKTOP, [ALL, 2, 0, 0, 0]);
+    x.wm_state(hwnd.xid(), true, x.atoms._NET_WM_STATE_STICKY, 0);
+    x.flush();
+    Ok(())
+}
+
 /// Frameless, no-taskbar window that may take focus (full-screen overlays
 /// such as draw-on-screen). Cheap to call every frame.
 pub fn ensure_popup(hwnd: Hwnd) -> Result<bool> {
@@ -177,6 +198,7 @@ pub fn ensure_overlay(hwnd: Hwnd, activatable: bool) -> Result<bool> {
     let first = !with_state(hwnd, |s| std::mem::replace(&mut s.styled, true));
     if first {
         skip_taskbar(hwnd)?;
+        all_workspaces(hwnd)?;
     }
     let hint = set_input_hint(hwnd, activatable)?;
     Ok(first || hint)

@@ -265,8 +265,11 @@ pub fn show(
     let gutter_y = grid.max.y + (cctx.panel.max.y - grid.max.y) * 0.5 - 1.0;
     {
         let c = pos2(grid.min.x + 8.0, gutter_y);
-        let hit = Rect::from_center_size(c, vec2(22.0, 18.0));
+        // 24 x 20: the desktop minimum target is 20 x 20 (HIG, Accessibility).
+        let hit = Rect::from_center_size(c, vec2(24.0, 20.0));
         let resp = ui.interact(hit, Id::new("nook-bento-edit"), Sense::click());
+        let name = if editing { "Done" } else { "Edit the layout" };
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
         let (glyph, color) = if editing {
             (icons::CHECK, theme.accent_fg())
         } else if resp.hovered() {
@@ -282,10 +285,7 @@ pub fn show(
             with_alpha(color, cctx.alpha),
             editing,
         );
-        if resp
-            .on_hover_text(if editing { "Done" } else { "Edit the layout" })
-            .clicked()
-        {
+        if resp.on_hover_text(name).clicked() {
             out.toggle_edit = true;
         }
     }

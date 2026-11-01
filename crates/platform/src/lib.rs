@@ -32,6 +32,8 @@ pub mod material;
 pub mod media;
 #[cfg_attr(target_os = "linux", path = "linux/monitor.rs")]
 pub mod monitor;
+#[cfg_attr(target_os = "linux", path = "linux/notifications.rs")]
+pub mod notifications;
 pub mod ocr;
 #[cfg_attr(target_os = "linux", path = "linux/perf.rs")]
 pub mod perf;
