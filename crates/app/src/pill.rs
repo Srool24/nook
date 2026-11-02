@@ -5,7 +5,8 @@
 //! - A running timer's ring and time on the left, live glyphs (coffee, a
 //!   phone pulse) on the right, a battery icon only when it runs low.
 //! - No line and no timer: a pair of eyes in the middle that look around,
-//!   blink, and watch the pointer when it comes near.
+//!   blink, and watch the pointer when it comes near. After a minute with
+//!   no keyboard or mouse input they close, until the next touch.
 //!
 //! Animation only runs while something moves: the eyes wake the UI for
 //! their next glance or blink, the marquee only while its text overflows.
@@ -37,6 +38,8 @@ pub struct PillContent {
     /// Glyph and text of the running line.
     pub ticker: Option<(&'static str, String)>,
     pub battery: Option<Battery>,
+    /// No input for a minute: the eyes close until the next touch.
+    pub asleep: bool,
 }
 
 impl PillContent {
@@ -146,7 +149,7 @@ pub fn draw(c: PillContent, ui: &mut Ui, rect: Rect, theme: &Theme) {
             marquee(ui, lane, text, theme);
         }
         // Glyphs on the right leave the middle free.
-        None if ring.is_none() => eyes(ui, rect, theme),
+        None if ring.is_none() => eyes(ui, rect, theme, c.asleep),
         None => {}
     }
 }
@@ -242,7 +245,7 @@ fn marquee(ui: &mut Ui, lane: Rect, text: &str, theme: &Theme) {
 /// Two eyes in the middle of the pill. They glance somewhere new every few
 /// seconds, blink now and then, and follow the pointer while it is over
 /// the window.
-fn eyes(ui: &mut Ui, rect: Rect, theme: &Theme) {
+fn eyes(ui: &mut Ui, rect: Rect, theme: &Theme, asleep: bool) {
     let ctx = ui.ctx().clone();
     let painter = ui.painter();
     let now = ctx.input(|i| i.time);
@@ -250,6 +253,25 @@ fn eyes(ui: &mut Ui, rect: Rect, theme: &Theme) {
     let c = rect.center();
     let (rx, ry) = (5.5, 7.5);
     let centers = [c - vec2(11.0, 0.0), c + vec2(11.0, 0.0)];
+
+    // Asleep: the lids come down slowly, then the closed eyes are two
+    // sleepy curves, drawn once and left alone (no wake-ups at all).
+    let shut = anim::tween(&ctx, Id::new("nook-eyes-shut"), asleep, 0.6);
+    if shut >= 0.99 {
+        for e in centers {
+            let points: Vec<Pos2> = (0..=8)
+                .map(|i| {
+                    let a = std::f32::consts::PI * i as f32 / 8.0;
+                    e + vec2(-rx * a.cos(), ry * 0.35 * a.sin())
+                })
+                .collect();
+            painter.add(egui::Shape::line(
+                points,
+                egui::Stroke::new(1.8, theme.pill_text),
+            ));
+        }
+        return;
+    }
 
     // Where to look: the pointer when it is around, else a glance that
     // changes every couple of seconds (about one in three straight ahead).
@@ -283,11 +305,12 @@ fn eyes(ui: &mut Ui, rect: Rect, theme: &Theme) {
     let b_slot = (now / BLINK_EVERY).floor();
     let blink_at = b_slot * BLINK_EVERY + hash01(b_slot + 7.0) as f64 * (BLINK_EVERY - BLINK_LEN);
     let t = ((now - blink_at) / BLINK_LEN) as f32;
-    let open = if reduced || !(0.0..1.0).contains(&t) {
+    let blink = if reduced || !(0.0..1.0).contains(&t) {
         1.0
     } else {
         (t * std::f32::consts::TAU).cos() * 0.5 + 0.5
     };
+    let open = blink * (1.0 - shut);
 
     let white = theme.pill_text;
     let pupil = theme.pill_bottom;
@@ -396,6 +419,7 @@ mod tests {
             badges: vec![],
             ticker: None,
             battery: None,
+            asleep: false,
         };
         assert_eq!(idle.size(), None);
         let music = PillContent {

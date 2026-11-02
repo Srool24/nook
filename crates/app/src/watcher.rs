@@ -26,7 +26,13 @@ pub struct SystemState {
     pub battery: Option<system::Battery>,
     /// Hash of the wallpaper's path; changes when the wallpaper does.
     pub wallpaper: u64,
+    /// No keyboard or mouse input for [`ASLEEP_AFTER`] (the pill's eyes
+    /// close).
+    pub asleep: bool,
 }
+
+/// Idle time after which the session counts as asleep.
+pub const ASLEEP_AFTER: Duration = Duration::from_secs(60);
 
 /// Shared knobs the UI can change without restarting the thread.
 #[derive(Default)]
@@ -62,6 +68,7 @@ pub fn sample(own: Hwnd, mode_cursor: bool) -> SystemState {
             system::wallpaper_path().hash(&mut h);
             h.finish()
         },
+        asleep: system::idle_time().is_some_and(|t| t >= ASLEEP_AFTER),
     }
 }
 

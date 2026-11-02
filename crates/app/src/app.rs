@@ -1042,6 +1042,7 @@ impl eframe::App for NookApp {
             badges,
             ticker: self.pill_ticker(&ctx),
             battery,
+            asleep: self.sys.asleep,
         };
         self.shell.collapsed_override = pill_content.size();
         let composited = self.backdrop.is_some();

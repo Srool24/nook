@@ -41,6 +41,20 @@ pub fn transparency_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// Time since the last keyboard or mouse input anywhere in the session,
+/// from Mutter's idle monitor (what dims the screen). `None` off GNOME.
+pub fn idle_time() -> Option<Duration> {
+    let (ms,): (u64,) = dbus::call(
+        "org.gnome.Mutter.IdleMonitor",
+        "/org/gnome/Mutter/IdleMonitor/Core",
+        "org.gnome.Mutter.IdleMonitor",
+        "GetIdletime",
+        &(),
+    )
+    .ok()?;
+    Some(Duration::from_millis(ms))
+}
+
 /// Pixel size of a tray (AppIndicator) icon.
 pub fn small_icon_size() -> u32 {
     22
