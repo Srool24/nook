@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#1c1c1e">
+<title>Nook Remote</title>
+<style>
+  :root {
+    --bg: #1c1c1e; --surface: #2c2c2e; --raised: #3a3a3c; --text: #f5f5f7;
+    --dim: #aeaeb2; --accent: #7c5cff; --ok: #30d158; --warn: #ff9f0a;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 15px/1.35 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    overscroll-behavior: none; -webkit-user-select: none; user-select: none; }
+  body { display: flex; flex-direction: column; padding: env(safe-area-inset-top) 12px
+    calc(12px + env(safe-area-inset-bottom)); gap: 10px; }
+  header { display: flex; align-items: center; gap: 10px; padding-top: 10px; }
+  header h1 { font-size: 17px; margin: 0; flex: 1; }
+  #dot { width: 9px; height: 9px; border-radius: 50%; background: var(--warn); }
+  #dot.on { background: var(--ok); }
+  #state { color: var(--dim); font-size: 13px; }
+  nav { display: grid; grid-template-columns: repeat(3, 1fr); background: var(--surface);
+    border-radius: 11px; padding: 3px; }
+  nav button { background: none; border: 0; color: var(--dim); font: inherit; font-weight: 600;
+    padding: 9px 0; border-radius: 9px; }
+  nav button.sel { background: var(--raised); color: var(--text); }
+  section { display: none; flex: 1; flex-direction: column; gap: 10px; min-height: 0; }
+  section.sel { display: flex; }
+  .pad { flex: 1; background: var(--surface); border-radius: 18px; touch-action: none;
+    display: grid; place-items: center; color: var(--dim); text-align: center; padding: 20px;
+    font-size: 14px; position: relative; }
+  .pad.held { background: #34324a; }
+  .row { display: grid; gap: 8px; grid-auto-flow: column; grid-auto-columns: 1fr; }
+  .btn { background: var(--surface); border: 0; color: var(--text); font: inherit;
+    font-weight: 600; min-height: 52px; border-radius: 14px; touch-action: none; }
+  .btn:active, .btn.down { background: var(--raised); }
+  .btn.small { min-height: 44px; font-weight: 500; }
+  label.slider { display: flex; align-items: center; gap: 10px; color: var(--dim); font-size: 13px; }
+  label.slider input { flex: 1; accent-color: var(--accent); }
+  textarea { width: 100%; min-height: 96px; background: var(--surface); color: var(--text);
+    border: 0; border-radius: 14px; padding: 12px; font: inherit; resize: none;
+    -webkit-user-select: text; user-select: text; }
+  textarea:focus { outline: 2px solid var(--accent); }
+  .hint { color: var(--dim); font-size: 13px; text-align: center; }
+  .seg { display: grid; grid-template-columns: 1fr 1fr; background: var(--surface); border-radius: 10px; padding: 3px; }
+  .seg button { background: none; border: 0; color: var(--dim); font: inherit; padding: 7px; border-radius: 8px; }
+  .seg button.sel { background: var(--raised); color: var(--text); }
+</style>
+</head>
+<body>
+<header>
+  <span id="dot"></span><h1>Nook</h1><span id="state">Connecting…</span>
+</header>
+<nav>
+  <button data-tab="pad" class="sel">Touchpad</button>
+  <button data-tab="air">Air mouse</button>
+  <button data-tab="keys">Keys</button>
+</nav>
+
+<section id="pad" class="sel">
+  <div class="pad" id="touch">Move with one finger · tap to click<br>two fingers: scroll · two-finger tap: right click</div>
+  <div class="row">
+    <button class="btn" data-hold="l">Left</button>
+    <button class="btn" data-hold="r">Right</button>
+  </div>
+  <label class="slider">Speed <input type="range" id="padSpeed" min="0.5" max="4" step="0.1" value="1.8"></label>
+</section>
+
+<section id="air">
+  <div class="seg" id="holdMode">
+    <button data-mode="flat" class="sel">Phone flat</button>
+    <button data-mode="up">Phone upright</button>
+  </div>
+  <div class="pad" id="airPad">Hold here and point the phone<br>tap to click</div>
+  <div class="row">
+    <button class="btn" data-hold="l">Left</button>
+    <button class="btn" data-hold="r">Right</button>
+  </div>
+  <label class="slider">Speed <input type="range" id="airSpeed" min="10" max="90" step="1" value="40"></label>
+</section>
+
+<section id="keys">
+  <textarea id="text" placeholder="Type here: it goes to the computer" autocapitalize="off" autocomplete="off" spellcheck="false"></textarea>
+  <div class="row">
+    <button class="btn small" data-key="Escape">Esc</button>
+    <button class="btn small" data-key="Tab">Tab</button>
+    <button class="btn small" data-key="Backspace">⌫</button>
+    <button class="btn small" data-key="Enter">Enter</button>
+  </div>
+  <div class="row">
+    <button class="btn small" data-key="Left">←</button>
+    <button class="btn small" data-key="Up">↑</button>
+    <button class="btn small" data-key="Down">↓</button>
+    <button class="btn small" data-key="Right">→</button>
+  </div>
+  <div class="row">
+    <button class="btn small" data-key="Previous">⏮</button>
+    <button class="btn small" data-key="PlayPause">⏯</button>
+    <button class="btn small" data-key="Next">⏭</button>
+  </div>
+  <div class="row">
+    <button class="btn small" data-key="VolumeDown">🔉</button>
+    <button class="btn small" data-key="Mute">🔇</button>
+    <button class="btn small" data-key="VolumeUp">🔊</button>
+  </div>
+  <div class="row">
+    <button class="btn small" data-key="PageUp">Slide back</button>
+    <button class="btn small" data-key="PageDown">Next slide</button>
+  </div>
+</section>
+
+<script>
+"use strict";
+const token = location.hash.slice(1);
+const $ = (q) => document.querySelector(q);
+const $$ = (q) => [...document.querySelectorAll(q)];
+let ws = null, live = false;
+
+function setState(text, on) {
+  $("#state").textContent = text;
+  $("#dot").classList.toggle("on", !!on);
+}
+function connect() {
+  if (!token) { setState("Scan the code in Nook again"); return; }
+  ws = new WebSocket(`wss://${location.host}/ws?t=${encodeURIComponent(token)}`);
+  ws.onopen = () => { live = true; setState("Connected", true); send("h"); };
+  ws.onclose = () => { live = false; setState("Reconnecting…"); setTimeout(connect, 1500); };
+  ws.onerror = () => ws.close();
+}
+function send(m) { if (live) ws.send(m); }
+setInterval(() => send("h"), 5000);
+connect();
+
+// Motion and scrolling are summed and sent once per frame.
+let mx = 0, my = 0, sx = 0, sy = 0;
+(function flush() {
+  if (mx || my) { send(`m ${mx.toFixed(2)} ${my.toFixed(2)}`); mx = my = 0; }
+  if (sx || sy) { send(`s ${sx.toFixed(2)} ${sy.toFixed(2)}`); sx = sy = 0; }
+  requestAnimationFrame(flush);
+})();
+
+// Tabs.
+$$("nav button").forEach((b) => b.addEventListener("click", () => {
+  $$("nav button").forEach((x) => x.classList.toggle("sel", x === b));
+  $$("section").forEach((s) => s.classList.toggle("sel", s.id === b.dataset.tab));
+}));
+
+// Buttons held for dragging; keys.
+$$("[data-hold]").forEach((b) => {
+  const down = (e) => { e.preventDefault(); b.classList.add("down"); send(`d ${b.dataset.hold}`); };
+  const up = (e) => { e.preventDefault(); if (!b.classList.contains("down")) return;
+    b.classList.remove("down"); send(`u ${b.dataset.hold}`); };
+  b.addEventListener("touchstart", down); b.addEventListener("touchend", up);
+  b.addEventListener("touchcancel", up);
+  b.addEventListener("mousedown", down); b.addEventListener("mouseup", up);
+});
+$$("[data-key]").forEach((b) => b.addEventListener("click", () => send(`k ${b.dataset.key}`)));
+
+// Touchpad.
+(function touchpad() {
+  const pad = $("#touch");
+  let last = null, start = 0, moved = 0, most = 0, scrolled = false;
+  const center = (ts) => {
+    let x = 0, y = 0;
+    for (const t of ts) { x += t.clientX; y += t.clientY; }
+    return { x: x / ts.length, y: y / ts.length, n: ts.length };
+  };
+  pad.addEventListener("touchstart", (e) => {
+    e.preventDefault();
+    if (e.touches.length === 1) { start = performance.now(); moved = 0; most = 0; scrolled = false; }
+    most = Math.max(most, e.touches.length);
+    last = center(e.touches);
+  }, { passive: false });
+  pad.addEventListener("touchmove", (e) => {
+    e.preventDefault();
+    const c = center(e.touches);
+    if (!last || c.n !== last.n) { last = c; return; }
+    const dx = c.x - last.x, dy = c.y - last.y;
+    moved += Math.hypot(dx, dy);
+    if (c.n === 1) {
+      const speed = +$("#padSpeed").value;
+      const accel = 1 + Math.min(2.5, Math.hypot(dx, dy) * 0.08);
+      mx += dx * speed * accel; my += dy * speed * accel;
+    } else {
+      // Natural scrolling: the page follows the fingers.
+      sx -= dx * 1.5; sy -= dy * 1.5; scrolled = true;
+    }
+    last = c;
+  }, { passive: false });
+  const end = (e) => {
+    e.preventDefault();
+    if (e.touches.length) { last = center(e.touches); return; }
+    if (scrolled) send("se");
+    if (moved < 8 && performance.now() - start < 260) {
+      send(most >= 3 ? "c m" : most === 2 ? "c r" : "c l");
+    }
+    last = null;
+  };
+  pad.addEventListener("touchend", end, { passive: false });
+  pad.addEventListener("touchcancel", end, { passive: false });
+})();
+
+// Air mouse: the gyroscope moves the pointer while the pad is held.
+(function air() {
+  const pad = $("#airPad");
+  let held = false, mode = "flat", start = 0, travel = 0, asked = false;
+  $$("#holdMode button").forEach((b) => b.addEventListener("click", () => {
+    mode = b.dataset.mode;
+    $$("#holdMode button").forEach((x) => x.classList.toggle("sel", x === b));
+  }));
+  async function permit() {
+    if (asked) return; asked = true;
+    // iOS asks for motion access from a tap.
+    if (typeof DeviceMotionEvent !== "undefined" && DeviceMotionEvent.requestPermission) {
+      try { await DeviceMotionEvent.requestPermission(); } catch (_) {}
+    }
+    if (!window.isSecureContext) setState("Motion needs the https page");
+  }
+  pad.addEventListener("touchstart", (e) => {
+    e.preventDefault(); permit(); held = true; start = performance.now(); travel = 0;
+    pad.classList.add("held");
+  }, { passive: false });
+  const end = (e) => {
+    e.preventDefault(); held = false; pad.classList.remove("held");
+    if (travel < 6 && performance.now() - start < 260) send("c l");
+  };
+  pad.addEventListener("touchend", end, { passive: false });
+  pad.addEventListener("touchcancel", end, { passive: false });
+  let lastT = 0;
+  window.addEventListener("devicemotion", (e) => {
+    const now = performance.now();
+    const dt = lastT ? Math.min(0.05, (now - lastT) / 1000) : 0;
+    lastT = now;
+    const r = e.rotationRate;
+    if (!held || !r || !dt) return;
+    const dead = (v) => (Math.abs(v || 0) < 0.8 ? 0 : v);
+    // Degrees per second turned into pixels: yaw moves across, pitch up and down.
+    const yaw = mode === "flat" ? dead(r.alpha) : dead(r.gamma);
+    const pitch = dead(r.beta);
+    const gain = +$("#airSpeed").value;
+    const dx = -yaw * gain * dt, dy = -pitch * gain * dt;
+    travel += Math.hypot(dx, dy);
+    mx += dx; my += dy;
+  });
+})();
+
+// Keyboard: what changed in the box is typed on the computer.
+(function keys() {
+  const box = $("#text");
+  let prev = "";
+  box.addEventListener("input", () => {
+    const now = box.value;
+    let i = 0;
+    while (i < prev.length && i < now.length && prev[i] === now[i]) i++;
+    for (let k = 0; k < [...prev.slice(i)].length; k++) send("k Backspace");
+    const added = now.slice(i);
+    if (added) send(`t ${added}`);
+    prev = now;
+    if (now.length > 200) { box.value = ""; prev = ""; }
+  });
+  box.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); send("k Enter"); box.value = ""; prev = ""; }
+  });
+})();
+</script>
+</body>
+</html>

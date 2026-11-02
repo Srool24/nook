@@ -517,7 +517,7 @@ fn agent(connect: Duration) -> ureq::Agent {
 }
 
 /// IPv4 addresses (and their interface index) that can reach the LAN.
-fn interfaces() -> Vec<(Ipv4Addr, Option<u32>)> {
+pub(super) fn interfaces() -> Vec<(Ipv4Addr, Option<u32>)> {
     if_addrs::get_if_addrs()
         .unwrap_or_default()
         .into_iter()

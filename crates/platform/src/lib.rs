@@ -44,6 +44,8 @@ pub mod process;
 pub mod raster;
 #[cfg(windows)]
 pub mod registry;
+#[cfg_attr(target_os = "linux", path = "linux/remote_input.rs")]
+pub mod remote_input;
 #[cfg_attr(target_os = "linux", path = "linux/shell.rs")]
 pub mod shell;
 #[cfg_attr(target_os = "linux", path = "linux/single_instance.rs")]

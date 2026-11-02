@@ -187,7 +187,7 @@ impl Drop for QrPairing {
 
 /// `n` random characters from a set without look-alikes. Seeded by the
 /// standard library's per-process random hasher keys.
-fn random_token(n: usize) -> String {
+pub(super) fn random_token(n: usize) -> String {
     use std::hash::{BuildHasher, Hasher};
     const SET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
     let state = std::collections::hash_map::RandomState::new();

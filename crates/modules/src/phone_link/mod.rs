@@ -18,6 +18,7 @@
 mod adb;
 mod localsend;
 mod mirror;
+mod remote;
 
 use crate::file_shelf::human_size;
 use adb::{Adb, Device, DeviceInfo, DeviceState, Notif};
@@ -61,6 +62,7 @@ enum Tab {
     #[default]
     Files,
     Alerts,
+    Mouse,
     Setup,
 }
 
@@ -183,6 +185,9 @@ pub struct PhoneLink {
     pair_code: String,
     /// QR pairing in progress (its code is on the device card).
     qr: Option<adb::QrPairing>,
+    /// The phone-as-a-mouse server, started the first time its tab opens
+    /// (and tried again a few seconds after a failure, e.g. no network).
+    remote: Option<(Result<remote::RemoteServer, String>, Instant)>,
     toast: Option<(String, Instant)>,
     picker: Option<Receiver<Picked>>,
     /// Pass in which the page was last drawn.
@@ -225,6 +230,7 @@ impl Default for PhoneLink {
             tab: Tab::default(),
             pair_code: String::new(),
             qr: None,
+            remote: None,
             toast: None,
             picker: None,
             page_pass: None,
@@ -1794,35 +1800,13 @@ impl PhoneLink {
         let Some(q) = &self.qr else {
             return;
         };
-        let Ok(code) = qrcodegen::QrCode::encode_text(&q.payload, qrcodegen::QrCodeEcc::Medium)
-        else {
+        let painter = ui.painter().clone();
+        let side = (area.height() - 92.0).clamp(96.0, 180.0);
+        let top = pos2(area.center().x, area.min.y + 6.0);
+        let Some(frame) = paint_qr(&painter, top, side, &q.payload) else {
             self.qr = None;
             return;
         };
-        let painter = ui.painter().clone();
-        let n = code.size();
-        let quiet = 2;
-        let side = (area.height() - 92.0).clamp(96.0, 180.0);
-        let cell = (side / (n + 2 * quiet) as f32).floor().max(1.0);
-        let side = cell * (n + 2 * quiet) as f32;
-        let top = area.min.y + 6.0;
-        let frame = Rect::from_min_size(pos2(area.center().x - side * 0.5, top), vec2(side, side));
-        painter.rect_filled(frame, 8.0, Color32::WHITE);
-        let origin = frame.min + vec2(quiet as f32 * cell, quiet as f32 * cell);
-        for y in 0..n {
-            for x in 0..n {
-                if code.get_module(x, y) {
-                    painter.rect_filled(
-                        Rect::from_min_size(
-                            origin + vec2(x as f32 * cell, y as f32 * cell),
-                            vec2(cell, cell),
-                        ),
-                        0.0,
-                        Color32::BLACK,
-                    );
-                }
-            }
-        }
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(500));
         lines(
@@ -1840,6 +1824,74 @@ impl PhoneLink {
         }
     }
 
+    /// The phone as a touchpad, air mouse and keyboard: a QR code with the
+    /// page's address, and how things stand.
+    fn mouse_tab(&mut self, ui: &mut Ui, area: Rect, theme: &Theme) {
+        let retry = match &self.remote {
+            None => true,
+            Some((Err(_), at)) => at.elapsed() > Duration::from_secs(5),
+            Some((Ok(_), _)) => false,
+        };
+        if retry && let Some(ctx) = &self.ctx {
+            let dir = shell::app_dir().unwrap_or_else(|| PathBuf::from("."));
+            let started = remote::RemoteServer::start(&dir, ctx.clone());
+            self.remote = Some((started, Instant::now()));
+            ctx.request_repaint_after(Duration::from_secs(5));
+        }
+        let painter = ui.painter().clone();
+        let server = match &self.remote {
+            Some((Ok(s), _)) => s,
+            Some((Err(e), _)) => {
+                let at = area.min + vec2(4.0, 4.0);
+                let font = Theme::font(SIZE_BODY);
+                lines(ui, at, e, area.width() - 8.0, 3, font, theme.text);
+                return;
+            }
+            None => return,
+        };
+        let side = (area.height() - 8.0).clamp(96.0, 200.0);
+        let top = pos2(area.min.x + side * 0.5 + 4.0, area.min.y + 4.0);
+        let Some(code) = paint_qr(&painter, top, side, &server.url) else {
+            return;
+        };
+        let x = code.max.x + 18.0;
+        let w = area.max.x - x;
+        // Other threads change the status, and they wake the UI.
+        let status = server.status.lock().map(|s| s.clone()).unwrap_or_default();
+        let (headline, color) = match (&status.access, status.phones) {
+            (remote::Access::Asking, _) => (
+                "Allow remote interaction on this computer".to_owned(),
+                theme.accent_fg(),
+            ),
+            (remote::Access::Failed(e), _) => (format!("Remote control is off: {e}"), theme.text),
+            (_, 0) => ("Scan with the phone's camera".to_owned(), theme.text),
+            (remote::Access::Allowed, 1) => ("Your phone is the mouse".to_owned(), theme.text),
+            (remote::Access::Allowed, n) => (format!("{n} phones connected"), theme.text),
+            (remote::Access::Idle, _) => (
+                "Phone connected: touch the pad to start".to_owned(),
+                theme.text,
+            ),
+        };
+        let font = Theme::font_semibold(SIZE_BODY);
+        let head_h = lines(ui, pos2(x, area.min.y + 4.0), &headline, w, 3, font, color);
+        lines(
+            ui,
+            pos2(x, area.min.y + 4.0 + head_h + 8.0),
+            "Touchpad, air mouse (point the phone) and keyboard, in the phone's browser: no app needed. Same Wi-Fi as this computer.\n\nThe first time, the browser warns about the certificate (it is Nook's own): choose Advanced > Proceed. GNOME then asks once to allow remote interaction.",
+            w,
+            9,
+            Theme::font(SIZE_LABEL),
+            theme.text_dim,
+        );
+        painter.text(
+            pos2(x, code.max.y - 6.0),
+            Align2::LEFT_CENTER,
+            server.url.split('#').next().unwrap_or_default(),
+            Theme::font(SIZE_LABEL),
+            theme.text_faint,
+        );
+    }
+
     fn find_tools(&mut self) {
         self.scrcpy = mirror::find_scrcpy();
         let exe = mirror::find_adb(self.scrcpy.as_deref());
@@ -1851,6 +1903,32 @@ impl PhoneLink {
             self.devices.clear();
         }
     }
+}
+
+/// A QR code of `payload`, dark on white (as scanners expect, in both
+/// themes), at most `side` wide, its top center at `top`. Returns its rect.
+fn paint_qr(painter: &egui::Painter, top: egui::Pos2, side: f32, payload: &str) -> Option<Rect> {
+    let code = qrcodegen::QrCode::encode_text(payload, qrcodegen::QrCodeEcc::Medium).ok()?;
+    let n = code.size();
+    let quiet = 2;
+    let cell = (side / (n + 2 * quiet) as f32).floor().max(1.0);
+    let side = cell * (n + 2 * quiet) as f32;
+    let frame = Rect::from_min_size(pos2(top.x - side * 0.5, top.y), vec2(side, side));
+    painter.rect_filled(frame, 8.0, Color32::WHITE);
+    let origin = frame.min + vec2(quiet as f32 * cell, quiet as f32 * cell);
+    for y in 0..n {
+        for x in 0..n {
+            if code.get_module(x, y) {
+                let at = origin + vec2(x as f32 * cell, y as f32 * cell);
+                painter.rect_filled(
+                    Rect::from_min_size(at, vec2(cell, cell)),
+                    0.0,
+                    Color32::BLACK,
+                );
+            }
+        }
+    }
+    Some(frame)
 }
 
 /// A switch on the right of a label. Returns true when flipped.
@@ -2226,10 +2304,18 @@ impl Module for PhoneLink {
         let mut idx = match self.tab {
             Tab::Files => 0,
             Tab::Alerts => 1,
-            Tab::Setup => 2,
+            Tab::Mouse => 2,
+            Tab::Setup => 3,
         };
-        if widgets::segmented(header, &["Files", &alerts, "Setup"], &mut idx, theme).changed() {
-            self.tab = [Tab::Files, Tab::Alerts, Tab::Setup][idx];
+        if widgets::segmented(
+            header,
+            &["Files", &alerts, "Mouse", "Setup"],
+            &mut idx,
+            theme,
+        )
+        .changed()
+        {
+            self.tab = [Tab::Files, Tab::Alerts, Tab::Mouse, Tab::Setup][idx];
         }
 
         let phone = Rect::from_min_size(body.min, vec2(PHONE_W, body.height()));
@@ -2241,6 +2327,7 @@ impl Module for PhoneLink {
         match self.tab {
             Tab::Files => self.files_tab(ui, content, theme),
             Tab::Alerts => self.alerts_tab(ui, content, theme),
+            Tab::Mouse => self.mouse_tab(ui, content, theme),
             Tab::Setup => self.setup_tab(ui, content, theme),
         }
         if let Some((msg, at)) = &self.toast {
