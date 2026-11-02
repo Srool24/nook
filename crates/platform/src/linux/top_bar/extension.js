@@ -55,6 +55,12 @@ export default class NookTopBar extends Extension {
             return;
         actor.get_parent()?.remove_child(actor);
         global.top_window_group.add_child(actor);
+        // Mutter may have kept the window below the bar; Nook asked for
+        // the top of the monitor.
+        const frame = w.get_frame_rect();
+        const monitor = global.display.get_monitor_geometry(w.get_monitor());
+        if (frame.y > monitor.y)
+            w.move_frame(true, frame.x, monitor.y);
         if (!this._lifted.has(actor)) {
             this._lifted.add(actor);
             actor.connect('destroy', () => this._lifted?.delete(actor));

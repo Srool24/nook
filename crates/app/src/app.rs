@@ -492,8 +492,9 @@ impl NookApp {
                     }
                     Err(e) => Some(format!("Could not set up the extension: {e}")),
                 };
-                if let Some(n) = &self.top_bar_note {
-                    tracing::warn!("top bar: {n}");
+                match &self.top_bar_note {
+                    Some(n) => tracing::warn!("top bar: {n}"),
+                    None => tracing::info!("top bar: the extension is active"),
                 }
             }
             self.anchor = None;
@@ -545,6 +546,13 @@ impl NookApp {
             Some(_) => (mon.work.left, mon.bounds.top, mon.work.width(), h),
             None => (mon.work.left, mon.work.top + dy, mon.work.width(), h),
         };
+        if self.anchor != Some(rect) && self.cfg.in_top_bar {
+            tracing::info!(
+                "top bar: bar {bar:?} pt, monitor top {}, work area top {}, window at {rect:?}",
+                mon.bounds.top,
+                mon.work.top
+            );
+        }
         if self.anchor != Some(rect) {
             match window::set_rect(self.hwnd, rect.0, rect.1, rect.2, rect.3) {
                 Ok(()) => {

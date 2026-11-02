@@ -5,7 +5,7 @@
 //! - A running timer's ring and time on the left, live glyphs (coffee, a
 //!   phone pulse) on the right, a battery icon only when it runs low.
 //! - No line and no timer: a pair of eyes (see `eyes.rs`) in a pill a
-//!   quarter smaller.
+//!   quarter shorter.
 //!
 //! Animation only runs while something moves: the eyes wake the UI for
 //! their next glance or blink, the marquee only while its text overflows.
@@ -23,8 +23,8 @@ use std::time::Duration;
 
 /// Pill size while it runs a line.
 pub const TICKER_PILL: Vec2 = vec2(300.0, 34.0);
-/// Pill size around the eyes: three quarters of the usual 140 x 34.
-pub const EYES_PILL: Vec2 = vec2(105.0, 26.0);
+/// Pill size around the eyes: a quarter shorter than the usual 140 x 34.
+pub const EYES_PILL: Vec2 = vec2(105.0, 34.0);
 /// Marquee speed, points per second, and the pause before it starts.
 const SPEED: f32 = 38.0;
 const START_PAUSE: f64 = 1.2;
