@@ -3,6 +3,7 @@
 //! with what the shell draws.
 
 use crate::config::{AccentSource, Config, Material, MonitorMode};
+use crate::pill;
 use crate::settings::{self, SETTINGS_ID, SettingsTile};
 use crate::stats::{self, Stats};
 use crate::tray::{Tray, TrayCommand};
@@ -10,7 +11,7 @@ use crate::update::{self, Updater};
 use crate::watcher::{self, SystemState, WatcherControl};
 use anyhow::{Context as _, Result};
 use crossbeam_channel::{Receiver, unbounded};
-use egui::{Color32, FontFamily, FontId, Rect, Ui, Vec2, pos2, vec2};
+use egui::{Color32, Rect, Ui, pos2, vec2};
 use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use nook_platform::backdrop::{Backdrop, Tint};
@@ -18,7 +19,6 @@ use nook_platform::hittest::{HitShape, HitTester};
 use nook_platform::material::{self, Applied};
 use nook_platform::notifications::{Notification, NotificationWatcher};
 use nook_platform::single_instance::InstanceGuard;
-use nook_platform::system::Battery;
 use nook_platform::{Hwnd, startup, system, wallpaper, window};
 use nook_ui::anim::{self, Motion};
 use nook_ui::bento;
@@ -26,8 +26,7 @@ use nook_ui::geometry::Squircle;
 use nook_ui::module::{Badge, Module, Registry};
 use nook_ui::shell::{Shell, ShellDrag, ShellMetrics, ShellOutput};
 use nook_ui::shell_state::ShellTimings;
-use nook_ui::theme::{self, FALLBACK_ACCENT, SIZE_BODY, SIZE_LABEL, Theme};
-use nook_ui::{icons_fill, paint};
+use nook_ui::theme::{self, FALLBACK_ACCENT, Theme};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -135,8 +134,9 @@ pub struct NookApp {
     system_accent: Option<Color32>,
     /// Desktop notifications as apps send them (`None` if the bus refused).
     notifications: Option<NotificationWatcher>,
-    /// The notification the pill shows, and since when (egui time).
-    notice: Option<(Notification, f64)>,
+    /// Notifications on the pill's running line, with when they came
+    /// (egui time).
+    notices: Vec<(Notification, f64)>,
     material: Applied,
     material_key: Option<(bool, bool, Material)>,
     /// Created lazily the first time the glass material is wanted.
@@ -314,7 +314,7 @@ impl NookApp {
             accent_rx,
             wallpaper_accent: None,
             notifications,
-            notice: None,
+            notices: Vec::new(),
             system_accent: system::system_accent()
                 .ok()
                 .map(|[r, g, b]| Color32::from_rgb(r, g, b)),
@@ -764,275 +764,54 @@ impl NookApp {
     }
 }
 
-/// Paints `text` so its ink (not its line box) starts at `x`, or ends at `x`
-/// when `from_right`, and is vertically centered on `cy`. Segoe UI's line
-/// box carries descender space and Phosphor glyphs are narrower than their
-/// em box, so aligning line boxes leaves the pill visibly off-center.
-fn ink_text(
-    painter: &egui::Painter,
-    text: &str,
-    font: FontId,
-    color: Color32,
-    x: f32,
-    cy: f32,
-    from_right: bool,
-) -> Rect {
-    let galley = painter.layout_no_wrap(text.to_owned(), font, color);
-    let ink = galley.mesh_bounds;
-    let dx = if from_right {
-        x - ink.max.x
-    } else {
-        x - ink.min.x
-    };
-    let offset = vec2(dx, cy - ink.center().y);
-    painter.galley(pos2(offset.x, offset.y), galley, color);
-    ink.translate(offset)
-}
-
-fn icon_font(size: f32, fill: bool) -> FontId {
-    let family = if fill {
-        theme::FAMILY_ICON_FILL
-    } else {
-        theme::FAMILY_ICON_REGULAR
-    };
-    FontId::new(size, FontFamily::Name(family.into()))
-}
-
-/// Size of the pill while it shows a notification.
-const NOTICE_PILL: Vec2 = vec2(340.0, 34.0);
-/// How long a notification stays in the pill.
-const NOTICE_SECS: f64 = 6.0;
+/// How long a notification stays on the pill's running line.
+const NOTICE_SECS: f64 = 30.0;
 
 impl NookApp {
-    /// The newest notification still due in the pill. Each new one
-    /// restarts the time; the panel being open shows none (it would only
-    /// come back once the panel closes, stale).
-    fn current_notice(&mut self, ctx: &egui::Context) -> Option<Notification> {
+    /// The pill's running line: the notifications of the last
+    /// [`NOTICE_SECS`] (newest first), else what a module has (the song
+    /// playing). Notifications are cleared once the panel opens.
+    fn pill_ticker(&mut self, ctx: &egui::Context) -> Option<(&'static str, String)> {
         let now = ctx.input(|i| i.time);
-        if let Some(n) = self
-            .notifications
-            .as_ref()
-            .and_then(|w| w.poll().into_iter().last())
-        {
-            self.notice = Some((n, now));
+        if let Some(w) = &self.notifications {
+            for n in w.poll() {
+                self.notices.push((n, now));
+            }
         }
         if self.shell.state.is_open() {
-            self.notice = None;
+            self.notices.clear();
         }
-        let (n, at) = self.notice.as_ref()?;
-        let left = at + NOTICE_SECS - now;
-        if left <= 0.0 {
-            self.notice = None;
-            return None;
+        self.notices.retain(|(_, at)| now - at < NOTICE_SECS);
+        if let Some(oldest) = self.notices.iter().map(|(_, at)| *at).reduce(f64::min) {
+            ctx.request_repaint_after(Duration::from_secs_f64(oldest + NOTICE_SECS - now));
+            let line = self
+                .notices
+                .iter()
+                .rev()
+                .map(|(n, _)| notice_text(n))
+                .collect::<Vec<_>>()
+                .join("     •     ");
+            return Some((nook_ui::icons_fill::BELL_SIMPLE, line));
         }
-        ctx.request_repaint_after(Duration::from_secs_f64(left));
-        Some(n.clone())
+        self.registry.visible().find_map(|m| m.ticker())
     }
 }
 
-/// The pill while a notification shows: a bell, the app's name, then the
-/// summary and as much of the body as fits, on one line.
-fn draw_notice(n: &Notification, ui: &mut Ui, rect: Rect, theme: &Theme) {
-    const PAD: f32 = 15.0;
-    let painter = ui.painter();
-    let cy = rect.center().y;
-    let bell = ink_text(
-        painter,
-        icons_fill::BELL_SIMPLE,
-        icon_font(14.0, true),
-        theme.accent_fg(),
-        rect.min.x + PAD,
-        cy,
-        false,
-    );
-    let mut x = bell.max.x + 8.0;
-    let max_x = rect.max.x - PAD;
-    let line = |text: &str, font: FontId, color: Color32, x: &mut f32| {
-        if text.is_empty() || *x >= max_x - 8.0 {
-            return;
-        }
-        let mut job = egui::text::LayoutJob::single_section(
-            text.to_owned(),
-            egui::TextFormat::simple(font, color),
-        );
-        job.wrap = egui::text::TextWrapping {
-            max_width: max_x - *x,
-            max_rows: 1,
-            break_anywhere: true,
-            overflow_character: Some('…'),
-        };
-        let galley = painter.layout_job(job);
-        let w = galley.size().x;
-        painter.galley(pos2(*x, cy - galley.size().y * 0.5), galley, color);
-        *x += w + 6.0;
-    };
-    let app = if n.app.is_empty() {
-        n.summary.as_str()
+/// "App: Title — text", leaving out what is empty.
+fn notice_text(n: &Notification) -> String {
+    let mut parts = Vec::new();
+    if !n.summary.is_empty() {
+        parts.push(n.summary.as_str());
+    }
+    if !n.body.is_empty() {
+        parts.push(n.body.as_str());
+    }
+    let text = parts.join(" — ");
+    if n.app.is_empty() || n.app == n.summary {
+        text
     } else {
-        n.app.as_str()
-    };
-    line(
-        app,
-        Theme::font(SIZE_LABEL + 1.0),
-        theme.pill_text_dim,
-        &mut x,
-    );
-    if !n.app.is_empty() {
-        line(
-            &n.summary,
-            Theme::font_semibold(SIZE_BODY),
-            theme.pill_text,
-            &mut x,
-        );
+        format!("{}: {text}", n.app)
     }
-    line(&n.body, Theme::font(SIZE_BODY), theme.pill_text_dim, &mut x);
-}
-
-/// Collapsed pill: live badges from modules (ring + label on the left,
-/// glyphs and pulse dots on the right), inset by the same ink margin on
-/// both sides.
-fn draw_pill(badges: Vec<Badge>, battery: Option<Battery>, ui: &mut Ui, rect: Rect, theme: &Theme) {
-    const PAD: f32 = 15.0;
-    let painter = ui.painter();
-    let cy = rect.center().y;
-    let left = rect.min.x + PAD;
-    let mut right = rect.max.x - PAD;
-    let now = ui.input(|i| i.time);
-    let clock = system::clock();
-
-    // Left: a running timer's ring + countdown, otherwise the clock.
-    let ring = badges.iter().find_map(|b| match b {
-        Badge::Ring { progress, label } => Some((*progress, label.clone())),
-        _ => None,
-    });
-    match ring {
-        Some((progress, label)) => {
-            let r = 6.0;
-            paint::ring(
-                painter,
-                pos2(left + r, cy),
-                r,
-                2.0,
-                progress,
-                theme::with_alpha(theme.pill_text_dim, 0.35),
-                theme.accent,
-            );
-            ink_text(
-                painter,
-                &label,
-                Theme::font_semibold(SIZE_BODY),
-                theme.pill_text,
-                left + 2.0 * r + 7.0,
-                cy,
-                false,
-            );
-        }
-        None => {
-            ink_text(
-                painter,
-                &clock.time,
-                Theme::font_semibold(SIZE_BODY),
-                theme.pill_text,
-                left,
-                cy,
-                false,
-            );
-        }
-    }
-
-    // Right: live glyphs (coffee, phone pulse...), otherwise battery or date.
-    let mut any_right = false;
-    for badge in &badges {
-        match badge {
-            Badge::Ring { .. } => {}
-            Badge::Glyph { icon } => {
-                let ink = ink_text(
-                    painter,
-                    icon,
-                    icon_font(14.0, true),
-                    theme.accent_fg(),
-                    right,
-                    cy,
-                    true,
-                );
-                right = ink.min.x - 6.0;
-                any_right = true;
-            }
-            Badge::Pulse => {
-                let phase = ((now * 1.6).sin() * 0.5 + 0.5) as f32;
-                let c = pos2(right - 3.0, cy);
-                painter.circle_filled(
-                    c,
-                    3.0 + 3.0 * phase,
-                    theme::with_alpha(theme.accent, 0.35 * (1.0 - phase)),
-                );
-                painter.circle_filled(c, 3.0, theme.accent);
-                right -= 12.0;
-                any_right = true;
-                ui.ctx().request_repaint_after(Duration::from_millis(33));
-            }
-        }
-    }
-    if !any_right {
-        match battery {
-            Some(b) => {
-                let text = ink_text(
-                    painter,
-                    &format!("{}%", b.percent),
-                    Theme::font(SIZE_LABEL + 1.0),
-                    theme.pill_text_dim,
-                    right,
-                    cy,
-                    true,
-                );
-                let (icon, color) = battery_icon(b, theme);
-                ink_text(
-                    painter,
-                    icon,
-                    icon_font(15.0, b.charging),
-                    color,
-                    text.min.x - 4.0,
-                    cy,
-                    true,
-                );
-            }
-            None => {
-                ink_text(
-                    painter,
-                    &clock.date,
-                    Theme::font(SIZE_LABEL + 1.0),
-                    theme.pill_text_dim,
-                    right,
-                    cy,
-                    true,
-                );
-            }
-        }
-    }
-
-    // One wake-up when the minute changes; nothing in between.
-    ui.ctx()
-        .request_repaint_after(Duration::from_secs(u64::from(clock.secs_to_next_minute)));
-}
-
-fn battery_icon(b: Battery, theme: &Theme) -> (&'static str, Color32) {
-    use nook_ui::icons;
-    if b.charging {
-        return (icons::BATTERY_CHARGING, Color32::from_rgb(98, 214, 132));
-    }
-    let icon = match b.percent {
-        90.. => icons::BATTERY_FULL,
-        60.. => icons::BATTERY_HIGH,
-        30.. => icons::BATTERY_MEDIUM,
-        12.. => icons::BATTERY_LOW,
-        _ => icons::BATTERY_WARNING,
-    };
-    let color = if b.percent < 12 {
-        Color32::from_rgb(255, 99, 88)
-    } else {
-        theme.pill_text_dim
-    };
-    (icon, color)
 }
 
 fn timings(cfg: &Config) -> ShellTimings {
@@ -1259,8 +1038,12 @@ impl eframe::App for NookApp {
             .filter_map(|m| m.collapsed_badge())
             .collect();
         let battery = self.sys.battery;
-        let notice = self.current_notice(&ctx);
-        self.shell.collapsed_override = notice.as_ref().map(|_| NOTICE_PILL);
+        let pill_content = pill::PillContent {
+            badges,
+            ticker: self.pill_ticker(&ctx),
+            battery,
+        };
+        self.shell.collapsed_override = pill_content.size();
         let composited = self.backdrop.is_some();
         // Stay open while typing in the panel (and the window has focus) or
         // while files are dragged over it.
@@ -1275,10 +1058,7 @@ impl eframe::App for NookApp {
             &theme,
             hidden,
             composited,
-            |ui, rect, _alpha| match &notice {
-                Some(n) => draw_notice(n, ui, rect, &theme),
-                None => draw_pill(badges, battery, ui, rect, &theme),
-            },
+            |ui, rect, _alpha| pill::draw(pill_content, ui, rect, &theme),
             |ui, cctx| match page {
                 Page::Bento => {
                     let mut tiles = registry.grid_mut(editing);

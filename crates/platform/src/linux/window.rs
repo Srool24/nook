@@ -460,6 +460,28 @@ pub fn dpi(_hwnd: Hwnd) -> u32 {
     x().map_or(96, |x| x.xft_dpi())
 }
 
+/// [`dpi`], waiting up to `wait` for it to be set. Started at login, Nook
+/// can come up before GNOME's settings daemon has published `Xft.dpi`, and
+/// would take 96 (100%) on a 200% screen: a pill half the size, scaled up
+/// blurry. GNOME always sets it, 96 included, so its absence means "not
+/// yet".
+pub fn settled_dpi(wait: std::time::Duration) -> u32 {
+    let Ok(x) = x() else {
+        return 96;
+    };
+    let until = std::time::Instant::now() + wait;
+    loop {
+        if let Some(d) = x.xft_dpi_set() {
+            return d;
+        }
+        if std::time::Instant::now() >= until {
+            tracing::warn!("Xft.dpi not set after {wait:?}: assuming 100% scale");
+            return 96;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
 /// Forgets what was applied to a window that is gone.
 pub fn forget(hwnd: Hwnd) {
     let mut map = STATE.lock().unwrap_or_else(|e| e.into_inner());

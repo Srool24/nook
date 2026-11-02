@@ -57,7 +57,8 @@ Or just `cargo run --release` from the checkout.
 | OCR | Windows.Media.Ocr | Tesseract (TSV output for word boxes) |
 | Clipboard history | `AddClipboardFormatListener` | XFixes selection events; secrets skipped via `x-kde-passwordManagerHint`; writes through arboard |
 | Media | SMTC | MPRIS over D-Bus (art from `file://` and `https://`) |
-| Notifications in the pill | Not shown yet | A session-bus monitor (`BecomeMonitor`) sees apps' `Notify` calls; GNOME still shows its own banners. Nothing shows while Do Not Disturb is on |
+| Notifications in the pill | Not shown yet | A session-bus monitor (`BecomeMonitor`) sees `org.freedesktop.Notifications.Notify`, `org.gtk.Notifications.AddNotification` (GNOME apps) and the notification portal (Flatpak); GNOME still shows its own banners. Nothing shows while Do Not Disturb is on |
+| Display scale at login | System DPI | `Xft.dpi`; at start Nook waits up to 15 s for GNOME to publish it (autostart can run first) |
 | Keep awake (Coffee) | `SetThreadExecutionState` | `org.gnome.SessionManager.Inhibit` (portal `Inhibit` elsewhere) |
 | Voice memos | waveIn / PlaySound | `pw-record` / `pw-play` (`parec` / `paplay` fallback) |
 | System monitor | Win32 perf APIs | `/proc` and `/sys` |

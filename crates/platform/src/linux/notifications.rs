@@ -1,10 +1,14 @@
 //! Desktop notifications, as they are sent, for the pill to show.
 //!
-//! GNOME Shell owns `org.freedesktop.Notifications` and draws its own
-//! banners; Nook only watches. A connection of its own becomes a bus
-//! monitor (`org.freedesktop.DBus.Monitoring.BecomeMonitor`) for the
-//! `Notify` method calls apps make, which the session bus allows for the
-//! user's own session. Nothing is answered or changed, and nothing leaves
+//! GNOME Shell draws its own banners; Nook only watches. A connection of
+//! its own becomes a bus monitor (`org.freedesktop.DBus.Monitoring.
+//! BecomeMonitor`, which the session bus allows for the user's own
+//! session) for the three ways apps send notifications on GNOME:
+//! `org.freedesktop.Notifications.Notify` (libnotify, Chromium, Electron),
+//! `org.gtk.Notifications.AddNotification` (GApplication: GNOME's own
+//! apps) and `org.freedesktop.portal.Notification.AddNotification`
+//! (Flatpak apps; the portal passes them on to GNOME Shell, which would
+//! show twice, so a repeat within a moment is dropped). Nothing is answered or changed, and nothing leaves
 //! the machine. While GNOME's "Do Not Disturb" is on (banners off), the
 //! notifications are dropped here as GNOME drops its banners.
 
@@ -74,43 +78,116 @@ fn run(deliver: &dyn Fn(Notification) -> bool) -> Result<()> {
     // shared one.
     let conn = zbus::blocking::Connection::session()
         .map_err(|e| PlatformError::other("connecting to the session bus", e))?;
-    let rule = "type='method_call',interface='org.freedesktop.Notifications',member='Notify'";
+    let rules = vec![
+        "type='method_call',interface='org.freedesktop.Notifications',member='Notify'",
+        "type='method_call',interface='org.gtk.Notifications',member='AddNotification'",
+        "type='method_call',interface='org.freedesktop.portal.Notification',member='AddNotification'",
+    ];
     conn.call_method(
         Some("org.freedesktop.DBus"),
         "/org/freedesktop/DBus",
         Some("org.freedesktop.DBus.Monitoring"),
         "BecomeMonitor",
-        &(vec![rule], 0u32),
+        &(rules, 0u32),
     )
     .map_err(|e| PlatformError::other("watching notifications", e))?;
+    tracing::info!("notifications: watching the session bus");
+    let mut last: Option<(Notification, std::time::Instant)> = None;
     for msg in zbus::blocking::MessageIterator::from(&conn).flatten() {
         let header = msg.header();
-        if header.message_type() != zbus::message::Type::MethodCall
-            || header.member().map(|m| m.as_str()) != Some("Notify")
-        {
+        if header.message_type() != zbus::message::Type::MethodCall {
             continue;
         }
-        let Ok((app, _, _, summary, body, _, hints, _)) = msg.body().deserialize::<NotifyArgs>()
-        else {
-            continue;
+        let iface = header
+            .interface()
+            .map(|i| i.to_string())
+            .unwrap_or_default();
+        let member = header.member().map(|m| m.to_string()).unwrap_or_default();
+        let body = msg.body();
+        let n = match (iface.as_str(), member.as_str()) {
+            ("org.freedesktop.Notifications", "Notify") => {
+                let Ok((app, _, _, summary, text, _, hints, _)) = body.deserialize::<NotifyArgs>()
+                else {
+                    continue;
+                };
+                // Transient progress pings (volume, brightness OSDs) aren't news.
+                if hints.contains_key("x-canonical-private-synchronous") {
+                    continue;
+                }
+                Notification {
+                    app,
+                    summary: clean(&summary),
+                    body: clean(&text),
+                }
+            }
+            ("org.gtk.Notifications", "AddNotification") => {
+                let Ok((app_id, _, fields)) =
+                    body.deserialize::<(String, String, HashMap<String, OwnedValue>)>()
+                else {
+                    continue;
+                };
+                from_fields(&app_name(&app_id), &fields)
+            }
+            ("org.freedesktop.portal.Notification", "AddNotification") => {
+                let Ok((_, fields)) = body.deserialize::<(String, HashMap<String, OwnedValue>)>()
+                else {
+                    continue;
+                };
+                from_fields("", &fields)
+            }
+            _ => continue,
         };
-        // Transient progress pings (volume, brightness OSDs) aren't news.
-        if hints.contains_key("x-canonical-private-synchronous") || !banners_shown() {
+        tracing::debug!("notification from {:?}", n.app);
+        if (n.summary.is_empty() && n.body.is_empty()) || !banners_shown() {
             continue;
         }
-        let n = Notification {
-            app,
-            summary: clean(&summary),
-            body: clean(&body),
-        };
-        if n.summary.is_empty() && n.body.is_empty() {
+        // The portal hands a Flatpak app's notification on to GNOME Shell:
+        // the same text again, a moment later.
+        let repeat = last.as_ref().is_some_and(|(p, at)| {
+            p.summary == n.summary && p.body == n.body && at.elapsed().as_secs() < 3
+        });
+        last = Some((n.clone(), std::time::Instant::now()));
+        if repeat {
             continue;
         }
         if !deliver(n) {
             break;
         }
     }
+    tracing::warn!("notifications: the bus monitor stopped");
     Ok(())
+}
+
+/// A GLib/portal notification dictionary (`title`, `body`).
+fn from_fields(app: &str, fields: &HashMap<String, OwnedValue>) -> Notification {
+    let text = |key: &str| {
+        fields
+            .get(key)
+            .and_then(|v| String::try_from(v.clone()).ok())
+            .map(|t| clean(&t))
+            .unwrap_or_default()
+    };
+    Notification {
+        app: app.to_owned(),
+        summary: text("title"),
+        body: text("body"),
+    }
+}
+
+/// A readable name from an application id: `org.gnome.Calendar` ->
+/// `Calendar`, `org.telegram.desktop` -> `Telegram`.
+fn app_name(id: &str) -> String {
+    let parts: Vec<&str> = id.split('.').filter(|p| !p.is_empty()).collect();
+    let pick = match parts.as_slice() {
+        [.., name, last] if last.eq_ignore_ascii_case("desktop") => *name,
+        [.., last] => *last,
+        [] => "",
+    };
+    let mut c = pick.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().chain(c).collect(),
+        None => String::new(),
+    }
 }
 
 /// GNOME's Do Not Disturb turns `show-banners` off.
@@ -155,5 +232,13 @@ mod tests {
         );
         assert_eq!(clean("2 &lt; 3"), "2 < 3");
         assert_eq!(clean("  שלום   עולם \n"), "שלום עולם");
+    }
+
+    #[test]
+    fn app_ids_read_as_names() {
+        assert_eq!(app_name("org.gnome.Calendar"), "Calendar");
+        assert_eq!(app_name("org.telegram.desktop"), "Telegram");
+        assert_eq!(app_name("firefox"), "Firefox");
+        assert_eq!(app_name(""), "");
     }
 }

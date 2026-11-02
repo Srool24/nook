@@ -245,10 +245,13 @@ impl X {
     /// The X server's DPI setting (`Xft.dpi`), which GNOME sets from the
     /// display scale; 96 when unset.
     pub fn xft_dpi(&self) -> u32 {
-        let Some(db) = self.prop_string(self.root, self.atoms.RESOURCE_MANAGER) else {
-            return 96;
-        };
-        parse_xft_dpi(&db).unwrap_or(96)
+        self.xft_dpi_set().unwrap_or(96)
+    }
+
+    /// `Xft.dpi` if it is set yet.
+    pub fn xft_dpi_set(&self) -> Option<u32> {
+        let db = self.prop_string(self.root, self.atoms.RESOURCE_MANAGER)?;
+        parse_xft_dpi(&db)
     }
 
     /// Managed top-level client windows, bottom to top.

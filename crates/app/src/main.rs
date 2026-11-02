@@ -6,6 +6,7 @@ mod app;
 mod config;
 #[cfg(feature = "debug-overlay")]
 mod overlay;
+mod pill;
 mod settings;
 #[cfg(target_os = "linux")]
 mod shortcuts;
@@ -45,7 +46,7 @@ fn prepare_x11() {
         tracing::error!("no X display: Nook needs XWayland (or an X11 session)");
     }
     if std::env::var_os("WINIT_X11_SCALE_FACTOR").is_none() {
-        let dpi = nook_platform::window::dpi(nook_platform::Hwnd::from_raw(0));
+        let dpi = nook_platform::window::settled_dpi(std::time::Duration::from_secs(15));
         let scale = format!("{:.4}", dpi as f32 / 96.0);
         // SAFETY: called at startup, before any other thread exists.
         unsafe { std::env::set_var("WINIT_X11_SCALE_FACTOR", scale) };
