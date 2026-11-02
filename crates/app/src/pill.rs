@@ -4,8 +4,8 @@
 //!   playing (a module's [`Module::ticker`]). The pill widens for it.
 //! - A running timer's ring and time on the left, live glyphs (coffee, a
 //!   phone pulse) on the right, a battery icon only when it runs low.
-//! - Nothing else going on: a pair of eyes that look around, blink, and
-//!   watch the pointer when it comes near.
+//! - No line and no timer: a pair of eyes in the middle that look around,
+//!   blink, and watch the pointer when it comes near.
 //!
 //! Animation only runs while something moves: the eyes wake the UI for
 //! their next glance or blink, the marquee only while its text overflows.
@@ -93,7 +93,6 @@ pub fn draw(c: PillContent, ui: &mut Ui, rect: Rect, theme: &Theme) {
 
     // Right: live glyphs (not the line's own), else a low battery.
     let ticker_glyph = c.ticker.as_ref().map(|(g, _)| *g);
-    let mut any_right = false;
     for badge in &c.badges {
         match badge {
             Badge::Ring { .. } => {}
@@ -111,7 +110,6 @@ pub fn draw(c: PillContent, ui: &mut Ui, rect: Rect, theme: &Theme) {
                     true,
                 );
                 right = ink.min.x - 6.0;
-                any_right = true;
             }
             Badge::Pulse => {
                 let now = ui.input(|i| i.time);
@@ -124,7 +122,6 @@ pub fn draw(c: PillContent, ui: &mut Ui, rect: Rect, theme: &Theme) {
                 );
                 painter.circle_filled(p, 3.0, theme.accent);
                 right -= 12.0;
-                any_right = true;
                 ui.ctx().request_repaint_after(Duration::from_millis(33));
             }
         }
@@ -141,7 +138,6 @@ pub fn draw(c: PillContent, ui: &mut Ui, rect: Rect, theme: &Theme) {
             true,
         );
         right = ink.min.x - 6.0;
-        any_right = true;
     }
 
     match &c.ticker {
@@ -149,7 +145,8 @@ pub fn draw(c: PillContent, ui: &mut Ui, rect: Rect, theme: &Theme) {
             let lane = Rect::from_x_y_ranges(left..=right, rect.y_range());
             marquee(ui, lane, text, theme);
         }
-        None if ring.is_none() && !any_right => eyes(ui, rect, theme),
+        // Glyphs on the right leave the middle free.
+        None if ring.is_none() => eyes(ui, rect, theme),
         None => {}
     }
 }

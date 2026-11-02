@@ -93,22 +93,43 @@ fn run(deliver: &dyn Fn(Notification) -> bool) -> Result<()> {
     .map_err(|e| PlatformError::other("watching notifications", e))?;
     tracing::info!("notifications: watching the session bus");
     let mut last: Option<(Notification, std::time::Instant)> = None;
-    for msg in zbus::blocking::MessageIterator::from(&conn).flatten() {
+    let mut seen = 0u64;
+    for msg in zbus::blocking::MessageIterator::from(&conn) {
+        let msg = match msg {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!("notifications: bad message on the monitor: {e}");
+                continue;
+            }
+        };
         let header = msg.header();
-        if header.message_type() != zbus::message::Type::MethodCall {
-            continue;
-        }
         let iface = header
             .interface()
             .map(|i| i.to_string())
             .unwrap_or_default();
         let member = header.member().map(|m| m.to_string()).unwrap_or_default();
+        // The first few messages, by kind only, to tell "nothing arrives"
+        // from "arrives but isn't understood" in a report.
+        if seen < 5 {
+            seen += 1;
+            tracing::info!(
+                "notifications: monitor got {:?} {iface}.{member}",
+                header.message_type()
+            );
+        }
+        if header.message_type() != zbus::message::Type::MethodCall {
+            continue;
+        }
         let body = msg.body();
         let n = match (iface.as_str(), member.as_str()) {
             ("org.freedesktop.Notifications", "Notify") => {
-                let Ok((app, _, _, summary, text, _, hints, _)) = body.deserialize::<NotifyArgs>()
-                else {
-                    continue;
+                let (app, _, _, summary, text, _, hints, _) = match body.deserialize::<NotifyArgs>()
+                {
+                    Ok(args) => args,
+                    Err(e) => {
+                        tracing::warn!("notifications: unreadable Notify: {e}");
+                        continue;
+                    }
                 };
                 // Transient progress pings (volume, brightness OSDs) aren't news.
                 if hints.contains_key("x-canonical-private-synchronous") {
@@ -137,8 +158,12 @@ fn run(deliver: &dyn Fn(Notification) -> bool) -> Result<()> {
             }
             _ => continue,
         };
-        tracing::debug!("notification from {:?}", n.app);
-        if (n.summary.is_empty() && n.body.is_empty()) || !banners_shown() {
+        tracing::info!("notifications: one from {:?}", n.app);
+        if n.summary.is_empty() && n.body.is_empty() {
+            continue;
+        }
+        if !banners_shown() {
+            tracing::info!("notifications: not shown, Do Not Disturb is on");
             continue;
         }
         // The portal hands a Flatpak app's notification on to GNOME Shell:
