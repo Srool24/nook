@@ -137,6 +137,8 @@ pub struct NookApp {
     /// Notifications on the pill's running line, with when they came
     /// (egui time).
     notices: Vec<(Notification, f64)>,
+    /// Why the notch isn't in the top bar yet, when it was asked to be.
+    top_bar_note: Option<String>,
     material: Applied,
     material_key: Option<(bool, bool, Material)>,
     /// Created lazily the first time the glass material is wanted.
@@ -296,7 +298,7 @@ impl NookApp {
             cfg.usage_stats,
             builtin,
         );
-        Ok(Self {
+        let mut app = Self {
             cfg,
             hwnd,
             shell,
@@ -315,6 +317,7 @@ impl NookApp {
             wallpaper_accent: None,
             notifications,
             notices: Vec::new(),
+            top_bar_note: None,
             system_accent: system::system_accent()
                 .ok()
                 .map(|[r, g, b]| Color32::from_rgb(r, g, b)),
@@ -340,7 +343,13 @@ impl NookApp {
             pending_hotkey: crate::shortcuts::requested(),
             #[cfg(feature = "debug-overlay")]
             overlay: Default::default(),
-        })
+        };
+        // Refreshes the extension (a newer Nook may bring a newer one) and
+        // notes whether the notch can sit in the bar yet.
+        if app.cfg.in_top_bar {
+            app.apply_top_bar();
+        }
+        Ok(app)
     }
 
     /// The system's appearance (`cfg.theme` is no longer offered).
@@ -463,6 +472,45 @@ impl NookApp {
         }
     }
 
+    /// Installs and enables (or disables) the Shell extension that lifts
+    /// the notch into GNOME's top bar, and notes what is left to do.
+    fn apply_top_bar(&mut self) {
+        #[cfg(target_os = "linux")]
+        {
+            use nook_platform::top_bar::{self, State};
+            if !self.cfg.in_top_bar {
+                top_bar::disable();
+                self.top_bar_note = None;
+            } else {
+                self.top_bar_note = match top_bar::install_and_enable() {
+                    Ok(State::Active) => None,
+                    Ok(State::NeedsLogin) => Some(
+                        "Log out and back in once: GNOME loads the new extension at login".into(),
+                    ),
+                    Ok(State::Off) => {
+                        Some("GNOME turned the extension off: check the Extensions app".into())
+                    }
+                    Err(e) => Some(format!("Could not set up the extension: {e}")),
+                };
+                if let Some(n) = &self.top_bar_note {
+                    tracing::warn!("top bar: {n}");
+                }
+            }
+            self.anchor = None;
+        }
+    }
+
+    /// Height of the top bar in points when the notch sits in it.
+    fn top_bar_height(&self) -> Option<f32> {
+        if !self.cfg.in_top_bar {
+            return None;
+        }
+        let mon = self.sys.monitor?;
+        let scale = window::dpi(self.hwnd) as f32 / 96.0;
+        let bar = (mon.work.top - mon.bounds.top) as f32 / scale;
+        (bar > 8.0).then_some(bar)
+    }
+
     fn apply_startup(&mut self) {
         if let Err(e) = startup::set_enabled(self.cfg.launch_at_startup) {
             tracing::error!("launch at startup: {e}");
@@ -483,10 +531,20 @@ impl NookApp {
             return;
         };
         let scale = window::dpi(self.hwnd) as f32 / 96.0;
+        // In the top bar: from the very top of the screen, the pill
+        // centered in the bar's height.
+        let bar = self.top_bar_height();
+        self.shell.metrics.top_margin = match bar {
+            Some(bar) => ((bar - pill::EYES_PILL.y.min(bar - 6.0)) * 0.5).max(1.0),
+            None => ShellMetrics::default().top_margin,
+        };
         let h = (self.shell.window_size().y * scale).ceil() as i32;
         let room = (mon.work.height() - h).max(0);
         let dy = ((self.cfg.notch_y * scale).round() as i32).clamp(0, room);
-        let rect = (mon.work.left, mon.work.top + dy, mon.work.width(), h);
+        let rect = match bar {
+            Some(_) => (mon.work.left, mon.bounds.top, mon.work.width(), h),
+            None => (mon.work.left, mon.work.top + dy, mon.work.width(), h),
+        };
         if self.anchor != Some(rect) {
             match window::set_rect(self.hwnd, rect.0, rect.1, rect.2, rect.3) {
                 Ok(()) => {
@@ -775,7 +833,9 @@ impl NookApp {
         let now = ctx.input(|i| i.time);
         if let Some(w) = &self.notifications {
             for n in w.poll() {
-                self.notices.push((n, now));
+                if self.cfg.pill_notifications {
+                    self.notices.push((n, now));
+                }
             }
         }
         if self.shell.state.is_open() {
@@ -1042,9 +1102,24 @@ impl eframe::App for NookApp {
             badges,
             ticker: self.pill_ticker(&ctx),
             battery,
-            asleep: self.sys.asleep,
+            mood: crate::eyes::Mood {
+                asleep: self.sys.asleep,
+                drowsy: self.sys.drowsy,
+                low_battery: battery.is_some_and(|b| !b.charging && b.percent < 20),
+            },
         };
         self.shell.collapsed_override = pill_content.size();
+        if let Some(bar) = self.top_bar_height() {
+            // Whatever it shows, the pill stays inside the bar.
+            let fit = (bar - 6.0).max(16.0);
+            let size = self
+                .shell
+                .collapsed_override
+                .unwrap_or(self.shell.metrics.collapsed);
+            if size.y > fit {
+                self.shell.collapsed_override = Some(vec2(size.x, fit));
+            }
+        }
         let composited = self.backdrop.is_some();
         // Stay open while typing in the panel (and the window has focus) or
         // while files are dragged over it.
@@ -1054,6 +1129,7 @@ impl eframe::App for NookApp {
         self.shell.expanded_override = self.page_size(&ctx);
         let registry = &mut self.registry;
         let cfg = &mut self.cfg;
+        let top_bar_note = self.top_bar_note.as_deref();
         let out = self.shell.show(
             ui,
             &theme,
@@ -1103,7 +1179,8 @@ impl eframe::App for NookApp {
                     }
                 }
                 Page::Settings => {
-                    settings_out = settings::page(ui, cctx, &theme, cfg, &update_status);
+                    settings_out =
+                        settings::page(ui, cctx, &theme, cfg, &update_status, top_bar_note);
                 }
             },
         );
@@ -1136,6 +1213,9 @@ impl eframe::App for NookApp {
         }
         if settings_out.startup_toggled {
             self.apply_startup();
+        }
+        if settings_out.top_bar_toggled {
+            self.apply_top_bar();
         }
         if update_clicked || settings_out.install_update {
             self.updater.install();

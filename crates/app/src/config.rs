@@ -104,6 +104,11 @@ pub struct Config {
     /// Fade the notch out while a fullscreen app (game, video) is in front
     /// on its monitor. Off: the notch is always visible.
     pub hide_in_fullscreen: bool,
+    /// GNOME: the notch sits inside the top bar (through a small Shell
+    /// extension Nook installs), instead of below it.
+    pub in_top_bar: bool,
+    /// The pill runs new notifications.
+    pub pill_notifications: bool,
     pub hover_delay_ms: u32,
     pub collapse_grace_ms: u32,
     pub launch_at_startup: bool,
@@ -138,6 +143,8 @@ impl Default for Config {
             notch_y: 0.0,
             on_top: true,
             hide_in_fullscreen: false,
+            in_top_bar: false,
+            pill_notifications: true,
             hover_delay_ms: 120,
             collapse_grace_ms: 250,
             launch_at_startup: false,

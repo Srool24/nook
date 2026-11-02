@@ -18,8 +18,8 @@ pub const SETTINGS_ID: &str = "settings";
 const GAP: f32 = 8.0;
 const HEADER: f32 = 28.0;
 const ROW: f32 = 28.0;
-/// Height of the Appearance and Behavior cards (title + four rows).
-const TOP_CARD: f32 = 154.0;
+/// Height of the Appearance and Behavior cards (title + five rows).
+const TOP_CARD: f32 = 154.0 + ROW;
 /// Height of a collapsible card's clickable header.
 const DISCLOSURE: f32 = 44.0;
 /// Revealed height of each collapsible section's body.
@@ -134,6 +134,8 @@ pub struct PageOutput {
     pub back: bool,
     pub changed: bool,
     pub startup_toggled: bool,
+    /// "In the top bar" was switched.
+    pub top_bar_toggled: bool,
     /// "Manage plugins" was clicked.
     pub open_plugins: bool,
     /// "Check for updates" was clicked.
@@ -149,6 +151,7 @@ pub fn page(
     theme: &Theme,
     cfg: &mut Config,
     update: &Status,
+    top_bar_note: Option<&str>,
 ) -> PageOutput {
     let mut out = PageOutput::default();
     let ctx = ui.ctx().clone();
@@ -282,6 +285,19 @@ pub fn page(
                 cfg.notch_y = 0.0;
                 out.changed = true;
             }
+            let mut in_bar = cfg.in_top_bar;
+            let bar_tip = top_bar_note.unwrap_or(if cfg!(target_os = "linux") {
+                "The notch sits inside GNOME's top bar (through a small Shell extension Nook installs)"
+            } else {
+                "GNOME only"
+            });
+            if row(&mut lui, "In the top bar", theme, |ui| {
+                widgets::toggle(ui, &mut in_bar, theme).on_hover_text(bar_tip)
+            }) {
+                cfg.in_top_bar = in_bar;
+                out.top_bar_toggled = true;
+                out.changed = true;
+            }
             let mut hide = cfg.hide_in_fullscreen;
             if row(&mut lui, "Hide in fullscreen", theme, |ui| {
                 widgets::toggle(ui, &mut hide, theme)
@@ -319,6 +335,14 @@ pub fn page(
                 widgets::toggle(ui, &mut on_top, theme)
             }) {
                 cfg.on_top = on_top;
+                out.changed = true;
+            }
+            let mut notes = cfg.pill_notifications;
+            if row(&mut rui, "Notifications in the pill", theme, |ui| {
+                widgets::toggle(ui, &mut notes, theme)
+                    .on_hover_text("Run new notifications along the pill (not during Do Not Disturb)")
+            }) {
+                cfg.pill_notifications = notes;
                 out.changed = true;
             }
             let mut startup = cfg.launch_at_startup;

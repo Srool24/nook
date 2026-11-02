@@ -56,6 +56,10 @@ pub mod snip;
 pub mod startup;
 #[cfg_attr(target_os = "linux", path = "linux/system.rs")]
 pub mod system;
+/// GNOME only: the notch inside the top bar (a Shell extension).
+#[cfg(target_os = "linux")]
+#[path = "linux/top_bar.rs"]
+pub mod top_bar;
 #[cfg_attr(target_os = "linux", path = "linux/url_scheme.rs")]
 pub mod url_scheme;
 pub mod wallpaper;

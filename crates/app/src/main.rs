@@ -4,6 +4,7 @@
 
 mod app;
 mod config;
+mod eyes;
 #[cfg(feature = "debug-overlay")]
 mod overlay;
 mod pill;

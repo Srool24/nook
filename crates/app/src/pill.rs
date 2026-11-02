@@ -4,9 +4,8 @@
 //!   playing (a module's [`Module::ticker`]). The pill widens for it.
 //! - A running timer's ring and time on the left, live glyphs (coffee, a
 //!   phone pulse) on the right, a battery icon only when it runs low.
-//! - No line and no timer: a pair of eyes in the middle that look around,
-//!   blink, and watch the pointer when it comes near. After a minute with
-//!   no keyboard or mouse input they close, until the next touch.
+//! - No line and no timer: a pair of eyes (see `eyes.rs`) in a pill a
+//!   quarter smaller.
 //!
 //! Animation only runs while something moves: the eyes wake the UI for
 //! their next glance or blink, the marquee only while its text overflows.
@@ -14,17 +13,18 @@
 //!
 //! [`Module::ticker`]: nook_ui::module::Module::ticker
 
-use egui::{Color32, FontFamily, FontId, Id, Pos2, Rect, Ui, Vec2, pos2, vec2};
+use egui::{Color32, FontFamily, FontId, Id, Rect, Ui, Vec2, pos2, vec2};
 use nook_platform::system::Battery;
 use nook_ui::anim;
 use nook_ui::module::Badge;
 use nook_ui::paint;
-use nook_ui::spring::SpringParams;
 use nook_ui::theme::{self, SIZE_BODY, Theme};
 use std::time::Duration;
 
 /// Pill size while it runs a line.
 pub const TICKER_PILL: Vec2 = vec2(300.0, 34.0);
+/// Pill size around the eyes: three quarters of the usual 140 x 34.
+pub const EYES_PILL: Vec2 = vec2(105.0, 26.0);
 /// Marquee speed, points per second, and the pause before it starts.
 const SPEED: f32 = 38.0;
 const START_PAUSE: f64 = 1.2;
@@ -38,14 +38,34 @@ pub struct PillContent {
     /// Glyph and text of the running line.
     pub ticker: Option<(&'static str, String)>,
     pub battery: Option<Battery>,
-    /// No input for a minute: the eyes close until the next touch.
-    pub asleep: bool,
+    /// What the eyes make of the moment.
+    pub mood: crate::eyes::Mood,
 }
 
 impl PillContent {
-    /// The closed size it wants, when not the default.
+    /// The closed size it wants, when not the default: wide for a running
+    /// line, a quarter smaller for the eyes (a little wider per extra
+    /// glyph beside them).
     pub fn size(&self) -> Option<Vec2> {
-        self.ticker.as_ref().map(|_| TICKER_PILL)
+        if self.ticker.is_some() {
+            return Some(TICKER_PILL);
+        }
+        if self.ring().is_some() {
+            return None;
+        }
+        let glyphs = self
+            .badges
+            .iter()
+            .filter(|b| !matches!(b, Badge::Ring { .. }))
+            .count();
+        Some(EYES_PILL + vec2(20.0 * glyphs.saturating_sub(1) as f32, 0.0))
+    }
+
+    fn ring(&self) -> Option<(f32, String)> {
+        self.badges.iter().find_map(|b| match b {
+            Badge::Ring { progress, label } => Some((*progress, label.clone())),
+            _ => None,
+        })
     }
 }
 
@@ -56,10 +76,7 @@ pub fn draw(c: PillContent, ui: &mut Ui, rect: Rect, theme: &Theme) {
     let mut right = rect.max.x - PAD;
 
     // Left: a running timer's ring and countdown, else the line's glyph.
-    let ring = c.badges.iter().find_map(|b| match b {
-        Badge::Ring { progress, label } => Some((*progress, label.clone())),
-        _ => None,
-    });
+    let ring = c.ring();
     if let Some((progress, label)) = &ring {
         let r = 6.0;
         paint::ring(
@@ -149,7 +166,7 @@ pub fn draw(c: PillContent, ui: &mut Ui, rect: Rect, theme: &Theme) {
             marquee(ui, lane, text, theme);
         }
         // Glyphs on the right leave the middle free.
-        None if ring.is_none() => eyes(ui, rect, theme, c.asleep),
+        None if ring.is_none() => crate::eyes::draw(ui, rect, theme, c.mood),
         None => {}
     }
 }
@@ -242,110 +259,6 @@ fn marquee(ui: &mut Ui, lane: Rect, text: &str, theme: &Theme) {
     ctx.request_repaint_after(Duration::from_millis(30));
 }
 
-/// Two eyes in the middle of the pill. They glance somewhere new every few
-/// seconds, blink now and then, and follow the pointer while it is over
-/// the window.
-fn eyes(ui: &mut Ui, rect: Rect, theme: &Theme, asleep: bool) {
-    let ctx = ui.ctx().clone();
-    let painter = ui.painter();
-    let now = ctx.input(|i| i.time);
-    let reduced = anim::motion(&ctx).reduced;
-    let c = rect.center();
-    let (rx, ry) = (5.5, 7.5);
-    let centers = [c - vec2(11.0, 0.0), c + vec2(11.0, 0.0)];
-
-    // Asleep: the lids come down slowly, then the closed eyes are two
-    // sleepy curves, drawn once and left alone (no wake-ups at all).
-    let shut = anim::tween(&ctx, Id::new("nook-eyes-shut"), asleep, 0.6);
-    if shut >= 0.99 {
-        for e in centers {
-            let points: Vec<Pos2> = (0..=8)
-                .map(|i| {
-                    let a = std::f32::consts::PI * i as f32 / 8.0;
-                    e + vec2(-rx * a.cos(), ry * 0.35 * a.sin())
-                })
-                .collect();
-            painter.add(egui::Shape::line(
-                points,
-                egui::Stroke::new(1.8, theme.pill_text),
-            ));
-        }
-        return;
-    }
-
-    // Where to look: the pointer when it is around, else a glance that
-    // changes every couple of seconds (about one in three straight ahead).
-    const GLANCE: f64 = 2.8;
-    let slot = (now / GLANCE).floor();
-    let pointer = ctx.input(|i| i.pointer.latest_pos());
-    let target = match pointer {
-        Some(p) if !reduced => {
-            let d = p - c;
-            let reach = (d.length() / 120.0).min(1.0);
-            d.normalized() * reach
-        }
-        _ if reduced => Vec2::ZERO,
-        _ => {
-            let h = hash01(slot);
-            if h < 0.33 {
-                Vec2::ZERO
-            } else {
-                let a = hash01(slot + 0.5) * std::f32::consts::TAU;
-                vec2(a.cos(), a.sin() * 0.6)
-            }
-        }
-    };
-    let params = SpringParams::critical(260.0);
-    let gx = anim::spring(&ctx, Id::new("nook-eyes-x"), target.x, params);
-    let gy = anim::spring(&ctx, Id::new("nook-eyes-y"), target.y, params);
-
-    // A blink (0.16 s) at a random moment of every 4.5 s.
-    const BLINK_EVERY: f64 = 4.5;
-    const BLINK_LEN: f64 = 0.16;
-    let b_slot = (now / BLINK_EVERY).floor();
-    let blink_at = b_slot * BLINK_EVERY + hash01(b_slot + 7.0) as f64 * (BLINK_EVERY - BLINK_LEN);
-    let t = ((now - blink_at) / BLINK_LEN) as f32;
-    let blink = if reduced || !(0.0..1.0).contains(&t) {
-        1.0
-    } else {
-        (t * std::f32::consts::TAU).cos() * 0.5 + 0.5
-    };
-    let open = blink * (1.0 - shut);
-
-    let white = theme.pill_text;
-    let pupil = theme.pill_bottom;
-    for e in centers {
-        let h = (ry * open).max(0.8);
-        painter.add(egui::Shape::ellipse_filled(e, vec2(rx, h), white));
-        if open > 0.35 {
-            let p: Pos2 = e + vec2(gx * 2.4, gy * 3.0 * open);
-            painter.circle_filled(p, 2.8 * open.min(1.0), pupil);
-        }
-    }
-
-    if reduced {
-        return;
-    }
-    // Wake for the next glance or blink, not every frame.
-    let next_glance = (slot + 1.0) * GLANCE;
-    let next_blink = if now < blink_at {
-        blink_at
-    } else if t < 1.0 {
-        now + 0.016
-    } else {
-        let s = b_slot + 1.0;
-        s * BLINK_EVERY + hash01(s + 7.0) as f64 * (BLINK_EVERY - BLINK_LEN)
-    };
-    let wake = next_glance.min(next_blink) - now;
-    ctx.request_repaint_after(Duration::from_secs_f64(wake.max(0.016)));
-}
-
-/// A stable pseudo-random number in 0..1 for `x`.
-fn hash01(x: f64) -> f32 {
-    let v = (x * 12.9898).sin() * 43_758.545_3;
-    (v - v.floor()) as f32
-}
-
 /// Paints `text` so its ink (not its line box) starts at `x`, or ends at `x`
 /// when `from_right`, and is vertically centered on `cy`. Segoe UI's line
 /// box carries descender space and Phosphor glyphs are narrower than their
@@ -405,23 +318,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hash_is_stable_and_in_range() {
-        for i in 0..200 {
-            let h = hash01(i as f64);
-            assert!((0.0..1.0).contains(&h));
-            assert_eq!(h, hash01(i as f64));
-        }
-    }
-
-    #[test]
-    fn only_a_running_line_widens_the_pill() {
+    fn a_running_line_widens_the_pill_and_eyes_shrink_it() {
         let idle = PillContent {
             badges: vec![],
             ticker: None,
             battery: None,
-            asleep: false,
+            mood: Default::default(),
         };
-        assert_eq!(idle.size(), None);
+        assert_eq!(idle.size(), Some(EYES_PILL));
         let music = PillContent {
             ticker: Some(("x", "Song — Artist".into())),
             ..idle
