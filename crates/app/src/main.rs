@@ -50,7 +50,52 @@ fn prepare_x11() {
         let scale = format!("{:.4}", dpi as f32 / 96.0);
         // SAFETY: called at startup, before any other thread exists.
         unsafe { std::env::set_var("WINIT_X11_SCALE_FACTOR", scale) };
+        follow_dpi(dpi);
     }
+}
+
+/// winit's scale is fixed at start, but `Xft.dpi` can change after: at
+/// login GNOME may publish 96 first and the display's real scale a moment
+/// later (a pill half the size, scaled up blurry), and people change the
+/// scale in Settings. When it changes (and holds for two looks, 2 s
+/// apart), Nook starts over at the new scale.
+#[cfg(target_os = "linux")]
+fn follow_dpi(started: u32) {
+    let spawned = std::thread::Builder::new()
+        .name("nook-dpi".into())
+        .spawn(move || {
+            let mut pending = None;
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                let now = nook_platform::window::current_dpi().filter(|d| *d != started);
+                if now.is_some() && now == pending {
+                    tracing::info!("display scale changed ({started} -> {now:?} dpi): restarting");
+                    restart();
+                    return;
+                }
+                pending = now;
+            }
+        });
+    if let Err(e) = spawned {
+        tracing::warn!("watching the display scale: {e}");
+    }
+}
+
+/// Replaces this process with a fresh Nook (same arguments). The instance
+/// lock and sockets close on exec, so the new one takes them over.
+#[cfg(target_os = "linux")]
+fn restart() {
+    use std::os::unix::process::CommandExt;
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let err = std::process::Command::new(exe)
+        .args(std::env::args_os().skip(1))
+        .env_remove("WINIT_X11_SCALE_FACTOR")
+        .exec();
+    // Only reached when exec failed (e.g. the binary was replaced by an
+    // update): keep running at the old scale.
+    tracing::warn!("restarting at the new scale failed: {err}");
 }
 
 fn main() -> Result<()> {

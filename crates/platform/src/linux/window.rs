@@ -460,6 +460,11 @@ pub fn dpi(_hwnd: Hwnd) -> u32 {
     x().map_or(96, |x| x.xft_dpi())
 }
 
+/// `Xft.dpi` if it is set right now.
+pub fn current_dpi() -> Option<u32> {
+    x().ok()?.xft_dpi_set()
+}
+
 /// [`dpi`], waiting up to `wait` for it to be set. Started at login, Nook
 /// can come up before GNOME's settings daemon has published `Xft.dpi`, and
 /// would take 96 (100%) on a 200% screen: a pill half the size, scaled up

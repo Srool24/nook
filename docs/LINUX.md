@@ -59,7 +59,7 @@ Or just `cargo run --release` from the checkout.
 | Media | SMTC | MPRIS over D-Bus (art from `file://` and `https://`) |
 | Phone as a touchpad / air mouse | Not available yet | Nook serves a page over HTTPS (self-signed certificate, port 47811) on the local network; its address and a per-start token are in a QR code. Input goes through the RemoteDesktop portal; GNOME asks once and the approval is kept as a restore token |
 | Notifications in the pill | Not shown yet | A session-bus monitor (`BecomeMonitor`) sees `org.freedesktop.Notifications.Notify`, `org.gtk.Notifications.AddNotification` (GNOME apps) and the notification portal (Flatpak); GNOME still shows its own banners. Nothing shows while Do Not Disturb is on |
-| Display scale at login | System DPI | `Xft.dpi`; at start Nook waits up to 15 s for GNOME to publish it (autostart can run first) |
+| Display scale | System DPI | `Xft.dpi`; at start Nook waits up to 15 s for GNOME to publish it (autostart can run first), and restarts itself when it changes later (GNOME may publish 96 first at login; scale changed in Settings) |
 | Keep awake (Coffee) | `SetThreadExecutionState` | `org.gnome.SessionManager.Inhibit` (portal `Inhibit` elsewhere) |
 | Voice memos | waveIn / PlaySound | `pw-record` / `pw-play` (`parec` / `paplay` fallback) |
 | System monitor | Win32 perf APIs | `/proc` and `/sys` |
