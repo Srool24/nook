@@ -125,6 +125,12 @@ fn union(rects: impl Iterator<Item = Rect>) -> Option<Rect> {
     })
 }
 
+/// Whether Ctrl and Shift are held right now. Not read on Windows yet: the
+/// window's own key state (egui) covers it there.
+pub fn modifiers() -> (bool, bool) {
+    (false, false)
+}
+
 pub fn cursor_pos() -> Result<(i32, i32)> {
     let mut p = POINT::default();
     // SAFETY: valid out pointer.

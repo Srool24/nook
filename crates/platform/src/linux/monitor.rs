@@ -189,6 +189,27 @@ pub fn cursor_pos() -> Result<(i32, i32)> {
     Ok((p.root_x.into(), p.root_y.into()))
 }
 
+/// Whether Ctrl and Shift are held right now. Read from the X server, so
+/// it works for a window without keyboard focus (the notch never takes
+/// it just for a click).
+pub fn modifiers() -> (bool, bool) {
+    let Ok(x) = x() else {
+        return (false, false);
+    };
+    let Some(p) = x
+        .conn
+        .query_pointer(x.root)
+        .ok()
+        .and_then(|c| c.reply().ok())
+    else {
+        return (false, false);
+    };
+    let mask = u16::from(p.mask);
+    let ctrl = u16::from(x11rb::protocol::xproto::KeyButMask::CONTROL);
+    let shift = u16::from(x11rb::protocol::xproto::KeyButMask::SHIFT);
+    (mask & ctrl != 0, mask & shift != 0)
+}
+
 pub fn primary() -> Result<Monitor> {
     all()
         .into_iter()

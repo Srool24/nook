@@ -328,6 +328,7 @@ fn icon_name(glyph: &str) -> Option<&'static str> {
         i::FOLDER_OPEN => "Open folder",
         i::PLUS => "New",
         i::SELECTION => "Select an area",
+        i::SELECTION_ALL => "Select all",
         i::TRASH => "Delete",
         i::GEAR => "Settings",
         i::X => "Close",

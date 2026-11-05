@@ -4,8 +4,12 @@
 //! Drag files onto the notch (the pill opens as they arrive) and drop them
 //! anywhere on it. The tile shows how many are parked; drag the tile to
 //! take all of them, or right click it (or click) for the shelf page,
-//! where each file shows its Explorer thumbnail and can be dragged out,
-//! opened with a click, or removed.
+//! where each file shows its thumbnail. There, files are selected as in a
+//! file manager (click, Ctrl+click to add or drop one, Shift+click for a
+//! range, Ctrl+A for all, Esc for none), and dragging a selected file
+//! copies all the selected ones out: into a folder, or onto an email as
+//! attachments. Double click opens a file; Delete takes the selected ones
+//! off the shelf.
 //!
 //! The shelf keeps references, not copies: the files stay where they are,
 //! and ones that were moved away (dragged out with Shift, deleted) drop off.
@@ -21,6 +25,7 @@ use nook_platform::{shell, window};
 use nook_ui::module::{Badge, Module, TileCtx, TileSize};
 use nook_ui::theme::{SIZE_CAPTION, SIZE_ICON, SIZE_LABEL, Theme, with_alpha};
 use nook_ui::{anim, icons, paint, widgets};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 
@@ -127,6 +132,10 @@ pub struct FileShelf {
     pending: Vec<Thumb>,
     open_page: bool,
     ctx: Option<egui::Context>,
+    /// Selected files on the shelf page.
+    selected: HashSet<PathBuf>,
+    /// Where a Shift+click range starts.
+    anchor: Option<usize>,
 }
 
 impl FileShelf {
@@ -165,6 +174,7 @@ impl FileShelf {
     fn prune(&mut self) {
         let before = self.items.len();
         self.items.retain(|i| i.path.exists());
+        self.forget_missing_selection();
         if self.items.len() != before {
             self.save();
         }
@@ -188,6 +198,51 @@ impl FileShelf {
         }
     }
 
+    fn forget_missing_selection(&mut self) {
+        let items = &self.items;
+        self.selected.retain(|p| items.iter().any(|i| &i.path == p));
+        if self.anchor.is_some_and(|a| a >= self.items.len()) {
+            self.anchor = None;
+        }
+    }
+
+    /// The selected files, in shelf order.
+    fn selection(&self) -> Vec<PathBuf> {
+        self.items
+            .iter()
+            .filter(|i| self.selected.contains(&i.path))
+            .map(|i| i.path.clone())
+            .collect()
+    }
+
+    /// A click on card `i`, with Ctrl (toggle) or Shift (range from the
+    /// last click) held, as a file manager does.
+    fn click(&mut self, i: usize, toggle: bool, range: bool) {
+        let path = self.items[i].path.clone();
+        match (range, self.anchor) {
+            (true, Some(a)) => {
+                let (lo, hi) = (a.min(i), a.max(i));
+                if !toggle {
+                    self.selected.clear();
+                }
+                for item in &self.items[lo..=hi] {
+                    self.selected.insert(item.path.clone());
+                }
+                return;
+            }
+            _ if toggle => {
+                if !self.selected.remove(&path) {
+                    self.selected.insert(path);
+                }
+            }
+            _ => {
+                self.selected.clear();
+                self.selected.insert(path);
+            }
+        }
+        self.anchor = Some(i);
+    }
+
     fn request_thumbs(&mut self) {
         let Some((tx, _)) = &self.thumbs else {
             return;
@@ -203,6 +258,34 @@ impl FileShelf {
         widgets::card(ui.painter(), card, theme);
         let id = Id::new(("shelf-card", &self.items[i].path));
         let resp = ui.interact(card, id, Sense::click_and_drag());
+        let selected = self.selected.contains(&self.items[i].path);
+        let sel = anim::tween(ui.ctx(), id.with("sel"), selected, 0.12);
+        if sel > 0.0 {
+            let radius = nook_ui::theme::TILE_RADIUS;
+            ui.painter().rect_filled(
+                card,
+                radius,
+                with_alpha(theme.accent, if theme.dark { 0.22 } else { 0.14 } * sel),
+            );
+            ui.painter().rect_stroke(
+                card,
+                radius,
+                egui::Stroke::new(2.0, with_alpha(theme.accent, sel)),
+                egui::StrokeKind::Inside,
+            );
+            // A check in the top left corner, so the state isn't color alone.
+            let c = card.left_top() + vec2(12.0, 12.0);
+            ui.painter()
+                .circle_filled(c, 8.0, with_alpha(theme.accent, sel));
+            paint::icon(
+                ui.painter(),
+                c,
+                icons::CHECK,
+                10.0,
+                with_alpha(Color32::WHITE, sel),
+                true,
+            );
+        }
         let hover = anim::tween(ui.ctx(), id.with("hover"), resp.hovered(), 0.12);
         if hover > 0.0 {
             let wash = if theme.dark {
@@ -287,13 +370,24 @@ impl FileShelf {
                 return CardAction::Remove;
             }
         }
+        // egui only sees keys while the window has the keyboard, which the
+        // notch doesn't take for a click: ask the system too.
+        let (toggle, range) = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
+        let (toggle, range) = if resp.clicked() {
+            let (ctrl, shift) = nook_platform::monitor::modifiers();
+            (toggle || ctrl, range || shift)
+        } else {
+            (toggle, range)
+        };
         if resp.drag_started() {
             action = CardAction::Drag;
-        } else if resp.clicked() {
+        } else if resp.double_clicked() {
             action = CardAction::Open;
+        } else if resp.clicked() {
+            action = CardAction::Click { toggle, range };
         }
         resp.on_hover_text(format!(
-            "{}\nClick to open, drag to take it out",
+            "{}\nClick to select (Ctrl or Shift for more), double click to open, drag to copy out",
             item.path.display()
         ));
         action
@@ -302,6 +396,7 @@ impl FileShelf {
 
 enum CardAction {
     None,
+    Click { toggle: bool, range: bool },
     Open,
     Drag,
     Remove,
@@ -440,13 +535,42 @@ impl Module for FileShelf {
             self.items.clear();
             self.save();
         }
+        self.forget_missing_selection();
         if !self.items.is_empty() {
-            let drag_all = widgets::icon_button(header, icons::HAND_GRABBING, 26.0, false, theme)
+            let picked = self.selection();
+            let tip = match picked.len() {
+                0 => "Drag to copy everything out".to_owned(),
+                1 => "Drag to copy the selected file out".to_owned(),
+                n => format!("Drag to copy the {n} selected files out"),
+            };
+            let drag = widgets::icon_button(header, icons::HAND_GRABBING, 26.0, false, theme)
                 .interact(Sense::drag())
-                .on_hover_text("Drag to take everything");
-            if drag_all.drag_started() {
-                let all = self.items.iter().map(|i| i.path.clone()).collect();
-                self.drag_out(all);
+                .on_hover_text(tip);
+            if drag.drag_started() {
+                let paths = if picked.is_empty() {
+                    self.items.iter().map(|i| i.path.clone()).collect()
+                } else {
+                    picked.clone()
+                };
+                self.drag_out(paths);
+            }
+            let all = picked.len() == self.items.len();
+            let pick_all = widgets::icon_button(header, icons::SELECTION_ALL, 26.0, all, theme)
+                .on_hover_text(if all { "Select none" } else { "Select all" });
+            if pick_all.clicked() {
+                if all {
+                    self.selected.clear();
+                    self.anchor = None;
+                } else {
+                    self.selected = self.items.iter().map(|i| i.path.clone()).collect();
+                }
+            }
+            if !picked.is_empty() {
+                header.label(
+                    egui::RichText::new(format!("{} selected", picked.len()))
+                        .font(Theme::font(SIZE_LABEL))
+                        .color(theme.text_dim),
+                );
             }
         }
         if self.items.is_empty() {
@@ -511,26 +635,73 @@ impl Module for FileShelf {
                 }
             });
         match action {
+            Some((i, CardAction::Click { toggle, range })) => self.click(i, toggle, range),
             Some((i, CardAction::Open)) => {
                 if let Err(e) = shell::open(&self.items[i].path.to_string_lossy()) {
                     tracing::warn!("file shelf: open: {e}");
                 }
             }
             Some((i, CardAction::Drag)) => {
+                // A selected file takes the whole selection along; any
+                // other file goes alone (and becomes the selection).
                 let path = self.items[i].path.clone();
-                self.drag_out(vec![path]);
+                if !self.selected.contains(&path) {
+                    self.click(i, false, false);
+                }
+                let paths = self.selection();
+                self.drag_out(paths);
             }
             Some((i, CardAction::Remove)) => {
-                self.items.remove(i);
+                let path = self.items.remove(i).path;
+                self.selected.remove(&path);
+                self.anchor = None;
                 self.save();
             }
             _ => {}
         }
+        self.selection_keys(ui);
         false
     }
 }
 
 impl FileShelf {
+    /// Ctrl+A selects all, Esc clears, Delete takes the selection off the
+    /// shelf (the files stay where they are), Enter opens it. Only while
+    /// no text field has the keyboard.
+    fn selection_keys(&mut self, ui: &Ui) {
+        if ui.ctx().text_edit_focused() {
+            return;
+        }
+        let (all, none, delete, open) = ui.input(|i| {
+            (
+                i.modifiers.command && i.key_pressed(egui::Key::A),
+                i.key_pressed(egui::Key::Escape),
+                i.key_pressed(egui::Key::Delete),
+                i.key_pressed(egui::Key::Enter),
+            )
+        });
+        if all {
+            self.selected = self.items.iter().map(|i| i.path.clone()).collect();
+        }
+        if none {
+            self.selected.clear();
+            self.anchor = None;
+        }
+        if delete && !self.selected.is_empty() {
+            let selected = std::mem::take(&mut self.selected);
+            self.items.retain(|i| !selected.contains(&i.path));
+            self.anchor = None;
+            self.save();
+        }
+        if open {
+            for path in self.selection() {
+                if let Err(e) = shell::open(&path.to_string_lossy()) {
+                    tracing::warn!("file shelf: open: {e}");
+                }
+            }
+        }
+    }
+
     /// Uploads arrived thumbnails as textures (that needs the UI context).
     fn load_pending(&mut self, ctx: &egui::Context) {
         for (path, img) in std::mem::take(&mut self.pending) {
@@ -548,6 +719,49 @@ impl FileShelf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn shelf_of(n: usize) -> FileShelf {
+        let mut s = FileShelf::default();
+        for k in 0..n {
+            s.items
+                .push(Item::new(PathBuf::from(format!("/nonexistent/f{k}"))));
+        }
+        s
+    }
+
+    #[test]
+    fn selection_works_like_a_file_manager() {
+        let mut s = shelf_of(5);
+        s.click(1, false, false);
+        assert_eq!(s.selection().len(), 1);
+        // Ctrl adds, and drops again.
+        s.click(3, true, false);
+        assert_eq!(s.selection().len(), 2);
+        s.click(3, true, false);
+        assert_eq!(s.selection().len(), 1);
+        // Shift selects the range from the last click (Ctrl+click or not).
+        s.click(4, false, true);
+        assert_eq!(s.selection().len(), 2);
+        s.click(1, false, false);
+        s.click(4, false, true);
+        let names: Vec<String> = s
+            .selection()
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "/nonexistent/f1",
+                "/nonexistent/f2",
+                "/nonexistent/f3",
+                "/nonexistent/f4"
+            ]
+        );
+        // A plain click starts over.
+        s.click(0, false, false);
+        assert_eq!(s.selection(), vec![PathBuf::from("/nonexistent/f0")]);
+    }
 
     #[test]
     fn sizes_read_naturally() {
