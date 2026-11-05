@@ -115,6 +115,17 @@ impl Module for Media {
         })
     }
 
+    fn ticker(&self) -> Option<(&'static str, String)> {
+        let n = self.now.as_ref().filter(|n| n.playing)?;
+        let text = match (n.title.trim(), n.artist.trim()) {
+            ("", "") => return None,
+            (t, "") => t.to_owned(),
+            ("", a) => a.to_owned(),
+            (t, a) => format!("{t} — {a}"),
+        };
+        Some((icons::MUSIC_NOTES, text))
+    }
+
     fn attach(&mut self, ctx: &egui::Context) {
         let ctx = ctx.clone();
         match MediaWatcher::spawn(move || ctx.request_repaint()) {

@@ -10,6 +10,7 @@ use super::manifest::{Found, Mode};
 use super::protocol::{self, Out};
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -19,6 +20,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 /// No console window flashing up for console programs (python, node, ...).
+#[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// A poll run that takes longer is killed.
 const POLL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -49,7 +51,7 @@ fn command(found: &Found, data_dir: &Path, dark: bool, accent: &str) -> Command 
         if looks_local && local.exists() {
             local.into_os_string()
         } else {
-            m.run[0].clone().into()
+            runtime(&m.run[0]).into()
         }
     };
     let mut cmd = Command::new(program);
@@ -71,17 +73,35 @@ fn command(found: &Found, data_dir: &Path, dark: bool, accent: &str) -> Command 
         .env("PYTHONIOENCODING", "utf-8")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .creation_flags(CREATE_NO_WINDOW);
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
     cmd
 }
 
-/// `%APPDATA%\Nook\plugin-data\<id>`, created on first use.
+/// The program to run for `name`. Manifests written on Windows say
+/// `python` or `py`; Linux distributions without `python-is-python3` only
+/// have `python3`.
+fn runtime(name: &str) -> String {
+    if cfg!(windows) || !matches!(name, "python" | "py") {
+        return name.to_owned();
+    }
+    let on_path = |p: &str| {
+        std::env::var_os("PATH")
+            .is_some_and(|path| std::env::split_paths(&path).any(|d| d.join(p).is_file()))
+    };
+    if name == "python" && on_path("python") {
+        name.to_owned()
+    } else {
+        "python3".to_owned()
+    }
+}
+
+/// `%APPDATA%\Nook\plugin-data\<id>` (`~/.config/nook/plugin-data/<id>`
+/// on Linux), created on first use.
 pub fn data_dir(id: &str) -> PathBuf {
-    let base = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    let dir = base.join("Nook").join("plugin-data").join(id);
+    let base = nook_platform::shell::app_dir().unwrap_or_else(|| std::env::temp_dir().join("Nook"));
+    let dir = base.join("plugin-data").join(id);
     if let Err(e) = std::fs::create_dir_all(&dir) {
         tracing::warn!("plugin data dir {}: {e}", dir.display());
     }
@@ -487,12 +507,12 @@ mod tests {
     use super::*;
     use crate::plugins::manifest::Manifest;
 
-    /// A plugin folder in the temp dir with `plugin.toml` and `echo.ps1`.
+    /// A plugin folder in the temp dir with `plugin.toml` and [`SCRIPT`].
     fn plugin(name: &str, toml: &str, script: &str) -> Found {
         let dir =
             std::env::temp_dir().join(format!("nook-plugin-test-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("echo.ps1"), script).unwrap();
+        std::fs::write(dir.join(SCRIPT), script).unwrap();
         Found {
             manifest: Manifest::parse(toml).unwrap(),
             dir,
@@ -520,13 +540,36 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    const SCRIPT: &str = "echo.ps1";
+    #[cfg(windows)]
     const RUN: &str =
         r#"run = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "echo.ps1"]"#;
+    #[cfg(not(windows))]
+    const SCRIPT: &str = "echo.py";
+    #[cfg(not(windows))]
+    const RUN: &str = r#"run = ["python3", "echo.py"]"#;
 
-    #[test]
-    fn live_plugin_round_trip() {
-        // Answers every message with a text tile naming its type (and id).
-        let script = r#"
+    /// Answers every message with a text tile naming its type (and id).
+    #[cfg(not(windows))]
+    const LIVE: &str = r#"
+import json, sys
+for line in sys.stdin:
+    m = json.loads(line)
+    t = (m.get("type", "") + " " + (m.get("id") or "")).strip()
+    print(json.dumps({"type": "text", "text": t}), flush=True)
+    if m.get("type") == "shutdown":
+        break
+"#;
+    #[cfg(not(windows))]
+    const POLL: &str = r#"
+import json, os
+e = json.loads(os.environ["NOOK_EVENT"])["id"] if os.environ.get("NOOK_EVENT") else "none"
+print(json.dumps({"type": "text", "text": os.environ["NOOK_PLUGIN_ID"] + " " + e}))
+"#;
+
+    #[cfg(windows)]
+    const LIVE: &str = r#"
             while ($null -ne ($line = [Console]::In.ReadLine())) {
                 $m = $line | ConvertFrom-Json
                 $t = "$($m.type) $($m.id)".Trim()
@@ -534,6 +577,15 @@ mod tests {
                 if ($m.type -eq 'shutdown') { break }
             }
         "#;
+    #[cfg(windows)]
+    const POLL: &str = r#"
+            $e = if ($env:NOOK_EVENT) { ($env:NOOK_EVENT | ConvertFrom-Json).id } else { 'none' }
+            Write-Output (@{ type = 'text'; text = "$env:NOOK_PLUGIN_ID $e" } | ConvertTo-Json)
+        "#;
+
+    #[test]
+    fn live_plugin_round_trip() {
+        let script = LIVE;
         let found = plugin(
             "live",
             &format!("id = \"echo\"\nname = \"Echo\"\n{RUN}"),
@@ -548,10 +600,7 @@ mod tests {
 
     #[test]
     fn poll_plugin_reruns_with_event() {
-        let script = r#"
-            $e = if ($env:NOOK_EVENT) { ($env:NOOK_EVENT | ConvertFrom-Json).id } else { 'none' }
-            Write-Output (@{ type = 'text'; text = "$env:NOOK_PLUGIN_ID $e" } | ConvertTo-Json)
-        "#;
+        let script = POLL;
         let toml =
             format!("id = \"poller\"\nname = \"P\"\nmode = \"poll\"\ninterval = 3600\n{RUN}");
         let found = plugin("poll", &toml, script);

@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Nook
+GenericName=Notch utility hub
+Comment=A floating notch with timers, clipboard history, screen tools, phone link and more
+Exec=nook %u
+Icon=nook
+Terminal=false
+Categories=Utility;GTK;
+Keywords=notch;clipboard;screenshot;color;picker;ocr;timer;qr;calculator;phone;
+MimeType=x-scheme-handler/nook;
+StartupNotify=false
+StartupWMClass=Nook
+X-GNOME-UsesNotifications=true

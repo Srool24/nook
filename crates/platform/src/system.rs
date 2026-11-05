@@ -31,6 +31,12 @@ pub fn small_icon_size() -> u32 {
     if px > 0 { px as u32 } else { 16 }
 }
 
+/// Time since the last keyboard or mouse input. Not read on Windows yet
+/// (`GetLastInputInfo` would do it).
+pub fn idle_time() -> Option<std::time::Duration> {
+    None
+}
+
 /// "Animation effects" (Settings > Accessibility > Visual effects).
 pub fn animations_enabled() -> bool {
     let mut on = BOOL(1);

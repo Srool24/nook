@@ -1,0 +1,7 @@
+{
+  "uuid": "nook-top-bar@nook.linux",
+  "name": "Nook in the top bar",
+  "description": "Lets Nook's notch sit inside the top bar. Installed and enabled by Nook when you turn on Settings > In the top bar.",
+  "shell-version": ["45", "46", "47", "48", "49", "50"],
+  "url": "https://github.com/Geguchh024/nook"
+}

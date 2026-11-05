@@ -44,7 +44,7 @@ fn err(e: impl std::fmt::Display) -> PlatformError {
 
 /// First folder holding the Lens model: `NOOK_FONTNET_DIR`, `fontnet\` next
 /// to the exe, `assets\fontnet\` in a parent of the exe (dev builds), then
-/// `%APPDATA%\Nook\fontnet\`.
+/// `%APPDATA%\Nook\fontnet\` (`~/.config/nook/fontnet/` on Linux).
 pub fn model_dir() -> Option<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     if let Some(d) = std::env::var_os("NOOK_FONTNET_DIR") {
@@ -60,8 +60,8 @@ pub fn model_dir() -> Option<PathBuf> {
                 .map(|a| a.join("assets").join("fontnet")),
         );
     }
-    if let Some(a) = std::env::var_os("APPDATA") {
-        dirs.push(PathBuf::from(a).join("Nook").join("fontnet"));
+    if let Some(d) = crate::shell::app_dir() {
+        dirs.push(d.join("fontnet"));
     }
     dirs.into_iter()
         .find(|d| d.join(WEIGHTS).is_file() && d.join(CLASSES).is_file())

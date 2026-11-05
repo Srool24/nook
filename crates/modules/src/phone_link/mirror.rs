@@ -7,8 +7,8 @@
 //!
 //! The mirror is view-only by default: the window is click-through, so the
 //! panel underneath gets the clicks. **Control** hands it the mouse and
-//! keyboard; Esc (caught by a low-level hook before scrcpy sees it) or the
-//! Release button gives them back.
+//! keyboard; Esc (caught by a low-level hook, or an X11 key grab on Linux,
+//! before scrcpy sees it) or the Release button gives them back.
 
 use nook_platform::Hwnd;
 use nook_platform::embed::{self, EscHook};
@@ -54,8 +54,75 @@ pub enum Status {
     Exited(String),
 }
 
+/// scrcpy, wherever it was installed: Nook's own folder, next to the
+/// `nook` binary, PATH (dnf, Homebrew, `~/.local/bin`), Snap.
+#[cfg(not(windows))]
+pub fn find_scrcpy() -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = config_dir() {
+        candidates.push(dir.join("scrcpy").join("scrcpy"));
+    }
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf))
+    {
+        candidates.push(dir.join("scrcpy"));
+    }
+    candidates.extend(on_path("scrcpy"));
+    if let Some(home) = std::env::var_os("HOME") {
+        candidates.push(
+            PathBuf::from(home)
+                .join(".local")
+                .join("bin")
+                .join("scrcpy"),
+        );
+    }
+    candidates.push("/snap/bin/scrcpy".into());
+    candidates.push("/home/linuxbrew/.linuxbrew/bin/scrcpy".into());
+    candidates.into_iter().find(|p| p.is_file())
+}
+
+/// `~/.config/nook`, where Nook keeps its own copies of tools.
+#[cfg(not(windows))]
+fn config_dir() -> Option<PathBuf> {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .map(|c| c.join("nook"))
+}
+
+/// The adb to use: one next to scrcpy (scrcpy restarts a server of another
+/// version), else one on PATH (Fedora's `android-tools`) or in the Android
+/// SDK.
+#[cfg(not(windows))]
+pub fn find_adb(scrcpy: Option<&Path>) -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = scrcpy.and_then(Path::parent) {
+        candidates.push(dir.join("adb"));
+    }
+    candidates.extend(on_path("adb"));
+    if let Some(home) = std::env::var_os("HOME") {
+        candidates.push(
+            PathBuf::from(home)
+                .join("Android")
+                .join("Sdk")
+                .join("platform-tools")
+                .join("adb"),
+        );
+    }
+    candidates.into_iter().find(|p| p.is_file())
+}
+
+/// What the install button runs (shown in messages).
+#[cfg(windows)]
+pub const INSTALLER: &str = "winget";
+#[cfg(not(windows))]
+pub const INSTALLER: &str = "dnf";
+
 /// scrcpy, wherever it was installed: Nook's own folder, next to nook.exe,
 /// PATH (WinGet links), WinGet's package folder, Scoop, Chocolatey.
+#[cfg(windows)]
 pub fn find_scrcpy() -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(a) = std::env::var_os("APPDATA") {
@@ -105,6 +172,7 @@ pub fn find_scrcpy() -> Option<PathBuf> {
 
 /// The adb to use: the one shipped with scrcpy (scrcpy restarts a server of
 /// another version), else one on PATH or in the Android SDK.
+#[cfg(windows)]
 pub fn find_adb(scrcpy: Option<&Path>) -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(dir) = scrcpy.and_then(Path::parent) {
@@ -123,6 +191,7 @@ pub fn find_adb(scrcpy: Option<&Path>) -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.is_file())
 }
 
+#[cfg(windows)]
 fn strip_verbatim(p: PathBuf) -> PathBuf {
     let s = p.to_string_lossy();
     match s.strip_prefix(r"\\?\") {
@@ -138,6 +207,7 @@ fn on_path(exe: &str) -> Vec<PathBuf> {
 }
 
 /// `root/<prefix>*/**/file`, two levels deep.
+#[cfg(windows)]
 fn find_below(root: &Path, prefix: &str, file: &str) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(root) else {
@@ -159,7 +229,46 @@ fn find_below(root: &Path, prefix: &str, file: &str) -> Vec<PathBuf> {
     out
 }
 
+/// Opens a terminal that installs scrcpy (from the `zeno/scrcpy` Copr, the
+/// build scrcpy's README points Fedora users to) and adb (`android-tools`)
+/// with dnf.
+#[cfg(not(windows))]
+pub fn install_with_winget() -> std::io::Result<()> {
+    const SCRIPT: &str = "echo 'Installing scrcpy and adb for Nook...'; \
+        sudo dnf install -y android-tools && \
+        (sudo dnf install -y scrcpy || (sudo dnf copr enable -y zeno/scrcpy && sudo dnf install -y scrcpy)); \
+        echo; read -r -p 'Done. Press Enter to close.' _";
+    // Ptyxis is Fedora's terminal since 41, GNOME Terminal before.
+    let terminals: [(&str, &[&str]); 5] = [
+        ("ptyxis", &["--new-window", "--"]),
+        ("gnome-terminal", &["--"]),
+        ("kgx", &["-e"]),
+        ("konsole", &["-e"]),
+        ("xterm", &["-e"]),
+    ];
+    for (term, args) in terminals {
+        let found = on_path(term).into_iter().any(|p| p.is_file());
+        if !found {
+            continue;
+        }
+        return Command::new(term)
+            .args(args)
+            .args(["bash", "-c", SCRIPT])
+            .env_remove("GDK_BACKEND")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map(|_| ());
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "no terminal found; run: sudo dnf install android-tools scrcpy",
+    ))
+}
+
 /// Opens a console that installs scrcpy (and its adb) with WinGet.
+#[cfg(windows)]
 pub fn install_with_winget() -> std::io::Result<()> {
     use std::os::windows::process::CommandExt;
     const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
@@ -185,7 +294,9 @@ impl Mirror {
         aspect: f32,
         ctx: &egui::Context,
     ) -> std::io::Result<Self> {
+        #[cfg(windows)]
         use std::os::windows::process::CommandExt;
+        #[cfg(windows)]
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let title = format!("Nook mirror {}", super::localsend::random_hex(4));
         let (x, y, w, h) = rect;
@@ -215,12 +326,17 @@ impl Mirror {
         }
         // Physical pixels everywhere, like Nook (no bitmap-stretched mirror
         // at 125% scaling).
+        #[cfg(windows)]
         cmd.env("SDL_WINDOWS_DPI_AWARENESS", "permonitorv2")
             .env("SDL_WINDOWS_DPI_SCALING", "0")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
             .creation_flags(CREATE_NO_WINDOW);
+        // An X11 window (XWayland on GNOME), like Nook's own, so Nook can
+        // place it over the panel and make it click-through.
+        #[cfg(not(windows))]
+        cmd.env("SDL_VIDEODRIVER", "x11");
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         if let Some(dir) = scrcpy.parent() {
             cmd.current_dir(dir);
         }

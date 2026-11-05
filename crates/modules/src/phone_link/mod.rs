@@ -12,11 +12,13 @@
 //! - Back, home, recents, volume and power keys; USB or Wi-Fi (adb connect,
 //!   Android 11+ pairing, or switching a USB phone to Wi-Fi in one click).
 //!
-//! Settings live in `%APPDATA%\Nook\phone.txt`.
+//! Settings live in `%APPDATA%\Nook\phone.txt` (`~/.config/nook/phone.txt`
+//! on Linux).
 
 mod adb;
 mod localsend;
 mod mirror;
+mod remote;
 
 use crate::file_shelf::human_size;
 use adb::{Adb, Device, DeviceInfo, DeviceState, Notif};
@@ -26,13 +28,20 @@ use localsend::{Direction, LocalSend, Peer, State, Transfer};
 use mirror::{Mirror, Status};
 use nook_platform::{Hwnd, clipboard, files, shell, window};
 use nook_ui::module::{Badge, Module, TileCtx, TileSize};
-use nook_ui::theme::{SIZE_BODY, SIZE_ICON, SIZE_LABEL, Theme, mix, with_alpha};
+use nook_ui::theme::{SIZE_BODY, SIZE_CAPTION, SIZE_ICON, SIZE_LABEL, Theme, mix, with_alpha};
 use nook_ui::{anim, icons, paint, widgets};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
+
+/// How to let phones reach the LocalSend server.
+const FIREWALL_HINT: &str = if cfg!(windows) {
+    "Allow Nook through the Windows firewall if asked."
+} else {
+    "Fedora Workstation's firewall lets it through; elsewhere open the port."
+};
 
 /// The page is taller than the regular panel: room for a phone screen.
 const PAGE: egui::Vec2 = vec2(800.0, 560.0);
@@ -53,6 +62,7 @@ enum Tab {
     #[default]
     Files,
     Alerts,
+    Mouse,
     Setup,
 }
 
@@ -70,7 +80,7 @@ struct Settings {
 
 impl Settings {
     fn file() -> Option<PathBuf> {
-        std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("Nook").join("phone.txt"))
+        shell::app_dir().map(|d| d.join("phone.txt"))
     }
 
     fn load() -> Self {
@@ -173,6 +183,11 @@ pub struct PhoneLink {
     tab: Tab,
     connect_addr: String,
     pair_code: String,
+    /// QR pairing in progress (its code is on the device card).
+    qr: Option<adb::QrPairing>,
+    /// The phone-as-a-mouse server, started the first time its tab opens
+    /// (and tried again a few seconds after a failure, e.g. no network).
+    remote: Option<(Result<remote::RemoteServer, String>, Instant)>,
     toast: Option<(String, Instant)>,
     picker: Option<Receiver<Picked>>,
     /// Pass in which the page was last drawn.
@@ -214,6 +229,8 @@ impl Default for PhoneLink {
             owner: None,
             tab: Tab::default(),
             pair_code: String::new(),
+            qr: None,
+            remote: None,
             toast: None,
             picker: None,
             page_pass: None,
@@ -464,10 +481,21 @@ impl PhoneLink {
                 }
                 adb::Event::Message(m) => {
                     if m.contains("connected to") {
+                        if self.qr.is_some()
+                            && let Some(addr) = m.rsplit("connected to ").next()
+                        {
+                            self.connect_addr = addr.trim().to_owned();
+                        }
                         self.settings.wireless = self.connect_addr.trim().to_owned();
                         self.settings.save();
                     }
                     self.say(m);
+                }
+                adb::Event::QrDone(ok) => {
+                    self.qr = None;
+                    if ok {
+                        self.say("Phone connected over Wi-Fi");
+                    }
                 }
                 adb::Event::Unavailable => self.adb_missing = true,
             }
@@ -822,13 +850,17 @@ impl PhoneLink {
             {
                 match mirror::install_with_winget() {
                     Ok(()) => self.say("Installing… press Check again when it is done"),
-                    Err(e) => self.say(format!("Could not run winget: {e}")),
+                    Err(e) => self.say(format!("Could not run {}: {e}", mirror::INSTALLER)),
                 }
             }
             let b2 = Rect::from_center_size(pos2(c.x, c.y + 98.0), vec2(150.0, 28.0));
             if button(ui, b2, "Check again", None, false, theme).clicked() {
                 self.find_tools();
             }
+            return;
+        }
+        if self.qr.is_some() {
+            self.qr_card(ui, area, theme);
             return;
         }
         let Some(dev) = self.device().cloned() else {
@@ -849,12 +881,26 @@ impl PhoneLink {
             lines(
                 ui,
                 pos2(area.min.x + 10.0, c.y + 10.0),
-                "Plug it in with USB and turn on USB debugging (Developer options), or connect over Wi-Fi in Setup.\n\nFiles work without this: open LocalSend on the phone.",
+                "Plug it in with USB and turn on USB debugging (Developer options), or pair over Wi-Fi with a QR code.\n\nFiles work without this: open LocalSend on the phone.",
                 area.width() - 20.0,
                 9,
                 Theme::font(SIZE_LABEL),
                 theme.text_dim,
             );
+            let b = Rect::from_center_size(pos2(c.x, area.max.y - 24.0), vec2(170.0, 30.0));
+            if !self.adb_missing
+                && button(
+                    ui,
+                    b,
+                    "Pair with QR code",
+                    Some(icons::QR_CODE),
+                    true,
+                    theme,
+                )
+                .clicked()
+            {
+                self.start_qr();
+            }
             return;
         };
         match dev.state {
@@ -976,7 +1022,7 @@ impl PhoneLink {
         {
             match mirror::install_with_winget() {
                 Ok(()) => self.say("Installing… press Check again in Setup when it is done"),
-                Err(e) => self.say(format!("Could not run winget: {e}")),
+                Err(e) => self.say(format!("Could not run {}: {e}", mirror::INSTALLER)),
             }
         }
         if let Some(err) = &self.mirror_error {
@@ -1617,7 +1663,7 @@ impl PhoneLink {
                 heading(ui, "RECEIVING FILES");
                 match &self.ls {
                     Some(ls) => match &ls.server_error {
-                        None => dim(ui, &format!("Visible as \"{}\" on port {}. Allow Nook through the Windows firewall if asked.", ls.alias(), ls.port())),
+                        None => dim(ui, &format!("Visible as \"{}\" on port {}. {}", ls.alias(), ls.port(), FIREWALL_HINT)),
                         Some(e) => dim(ui, &format!("Receiving is off: {e}")),
                     },
                     None => dim(ui, "Starting…"),
@@ -1653,10 +1699,10 @@ impl PhoneLink {
                     None => {
                         dim(ui, "scrcpy is not installed. It is free and open source, and brings adb along.");
                         ui.horizontal(|ui| {
-                            if ui.button("Install with WinGet").clicked() {
+                            if ui.button(if cfg!(windows) { "Install with WinGet" } else { "Install with dnf" }).clicked() {
                                 match mirror::install_with_winget() {
                                     Ok(()) => self.say("Installing… press Check again when it is done"),
-                                    Err(e) => self.say(format!("Could not run winget: {e}")),
+                                    Err(e) => self.say(format!("Could not run {}: {e}", mirror::INSTALLER)),
                                 }
                             }
                             if ui.button("Check again").clicked() {
@@ -1695,6 +1741,14 @@ impl PhoneLink {
                     }
                 });
                 dim(ui, "Android 11+: Developer options > Wireless debugging. Pair with the code's address, then connect to the address on the main screen.");
+                if ui
+                    .add_enabled(!self.adb_missing, egui::Button::new("Pair with QR code"))
+                    .on_hover_text("Shows a code to scan in Wireless debugging > Pair device with QR code")
+                    .clicked()
+                {
+                    self.start_qr();
+                    self.tab = Tab::default();
+                }
                 let usb = self.device().is_some_and(|d| d.state == DeviceState::Ready && !d.wireless());
                 if ui
                     .add_enabled(usb, egui::Button::new("Switch the USB phone to Wi-Fi"))
@@ -1731,6 +1785,113 @@ impl PhoneLink {
             });
     }
 
+    /// Shows a pairing QR code on the device card and starts looking for
+    /// the phone that scans it.
+    fn start_qr(&mut self) {
+        if let (Some(a), Some(ctx)) = (&self.adb, &self.ctx) {
+            self.qr = Some(a.pair_qr(ctx.clone()));
+            self.say("Waiting for the phone to scan the code…");
+        }
+    }
+
+    /// The pairing QR code (dark on white, as scanners expect, in both
+    /// themes), what to do on the phone, and Cancel.
+    fn qr_card(&mut self, ui: &mut Ui, area: Rect, theme: &Theme) {
+        let Some(q) = &self.qr else {
+            return;
+        };
+        let painter = ui.painter().clone();
+        let side = (area.height() - 92.0).clamp(96.0, 180.0);
+        let top = pos2(area.center().x, area.min.y + 6.0);
+        let Some(frame) = paint_qr(&painter, top, side, &q.payload) else {
+            self.qr = None;
+            return;
+        };
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(500));
+        lines(
+            ui,
+            pos2(area.min.x + 10.0, frame.max.y + 8.0),
+            "On the phone: Settings > Developer options > Wireless debugging > Pair device with QR code. Same Wi-Fi as this computer.",
+            area.width() - 20.0,
+            5,
+            Theme::font(SIZE_LABEL),
+            theme.text_dim,
+        );
+        let b = Rect::from_center_size(pos2(area.center().x, area.max.y - 18.0), vec2(110.0, 26.0));
+        if button(ui, b, "Cancel", None, false, theme).clicked() {
+            self.qr = None;
+        }
+    }
+
+    /// The phone as a touchpad, air mouse and keyboard: a QR code with the
+    /// page's address, and how things stand.
+    fn mouse_tab(&mut self, ui: &mut Ui, area: Rect, theme: &Theme) {
+        let retry = match &self.remote {
+            None => true,
+            Some((Err(_), at)) => at.elapsed() > Duration::from_secs(5),
+            Some((Ok(_), _)) => false,
+        };
+        if retry && let Some(ctx) = &self.ctx {
+            let dir = shell::app_dir().unwrap_or_else(|| PathBuf::from("."));
+            let started = remote::RemoteServer::start(&dir, ctx.clone());
+            self.remote = Some((started, Instant::now()));
+            ctx.request_repaint_after(Duration::from_secs(5));
+        }
+        let painter = ui.painter().clone();
+        let server = match &self.remote {
+            Some((Ok(s), _)) => s,
+            Some((Err(e), _)) => {
+                let at = area.min + vec2(4.0, 4.0);
+                let font = Theme::font(SIZE_BODY);
+                lines(ui, at, e, area.width() - 8.0, 3, font, theme.text);
+                return;
+            }
+            None => return,
+        };
+        let side = (area.height() - 8.0).clamp(96.0, 200.0);
+        let top = pos2(area.min.x + side * 0.5 + 4.0, area.min.y + 4.0);
+        let Some(code) = paint_qr(&painter, top, side, &server.url) else {
+            return;
+        };
+        let x = code.max.x + 18.0;
+        let w = area.max.x - x;
+        // Other threads change the status, and they wake the UI.
+        let status = server.status.lock().map(|s| s.clone()).unwrap_or_default();
+        let (headline, color) = match (&status.access, status.phones) {
+            (remote::Access::Asking, _) => (
+                "Allow remote interaction on this computer".to_owned(),
+                theme.accent_fg(),
+            ),
+            (remote::Access::Failed(e), _) => (format!("Remote control is off: {e}"), theme.text),
+            (_, 0) => ("Scan with the phone's camera".to_owned(), theme.text),
+            (remote::Access::Allowed, 1) => ("Your phone is the mouse".to_owned(), theme.text),
+            (remote::Access::Allowed, n) => (format!("{n} phones connected"), theme.text),
+            (remote::Access::Idle, _) => (
+                "Phone connected: touch the pad to start".to_owned(),
+                theme.text,
+            ),
+        };
+        let font = Theme::font_semibold(SIZE_BODY);
+        let head_h = lines(ui, pos2(x, area.min.y + 4.0), &headline, w, 3, font, color);
+        lines(
+            ui,
+            pos2(x, area.min.y + 4.0 + head_h + 8.0),
+            "Touchpad, air mouse (point the phone) and keyboard, in the phone's browser: no app needed. Same Wi-Fi as this computer.\n\nThe first time, the browser warns about the certificate (it is Nook's own): choose Advanced > Proceed. GNOME then asks once to allow remote interaction.",
+            w,
+            9,
+            Theme::font(SIZE_LABEL),
+            theme.text_dim,
+        );
+        painter.text(
+            pos2(x, code.max.y - 6.0),
+            Align2::LEFT_CENTER,
+            server.url.split('#').next().unwrap_or_default(),
+            Theme::font(SIZE_LABEL),
+            theme.text_faint,
+        );
+    }
+
     fn find_tools(&mut self) {
         self.scrcpy = mirror::find_scrcpy();
         let exe = mirror::find_adb(self.scrcpy.as_deref());
@@ -1742,6 +1903,32 @@ impl PhoneLink {
             self.devices.clear();
         }
     }
+}
+
+/// A QR code of `payload`, dark on white (as scanners expect, in both
+/// themes), at most `side` wide, its top center at `top`. Returns its rect.
+fn paint_qr(painter: &egui::Painter, top: egui::Pos2, side: f32, payload: &str) -> Option<Rect> {
+    let code = qrcodegen::QrCode::encode_text(payload, qrcodegen::QrCodeEcc::Medium).ok()?;
+    let n = code.size();
+    let quiet = 2;
+    let cell = (side / (n + 2 * quiet) as f32).floor().max(1.0);
+    let side = cell * (n + 2 * quiet) as f32;
+    let frame = Rect::from_min_size(pos2(top.x - side * 0.5, top.y), vec2(side, side));
+    painter.rect_filled(frame, 8.0, Color32::WHITE);
+    let origin = frame.min + vec2(quiet as f32 * cell, quiet as f32 * cell);
+    for y in 0..n {
+        for x in 0..n {
+            if code.get_module(x, y) {
+                let at = origin + vec2(x as f32 * cell, y as f32 * cell);
+                painter.rect_filled(
+                    Rect::from_min_size(at, vec2(cell, cell)),
+                    0.0,
+                    Color32::BLACK,
+                );
+            }
+        }
+    }
+    Some(frame)
 }
 
 /// A switch on the right of a label. Returns true when flipped.
@@ -2084,7 +2271,7 @@ impl Module for PhoneLink {
                 c,
                 Align2::CENTER_CENTER,
                 count.min(99),
-                Theme::font_semibold(SIZE_LABEL - 2.0),
+                Theme::font_semibold(SIZE_CAPTION),
                 Color32::WHITE,
             );
         }
@@ -2117,10 +2304,18 @@ impl Module for PhoneLink {
         let mut idx = match self.tab {
             Tab::Files => 0,
             Tab::Alerts => 1,
-            Tab::Setup => 2,
+            Tab::Mouse => 2,
+            Tab::Setup => 3,
         };
-        if widgets::segmented(header, &["Files", &alerts, "Setup"], &mut idx, theme).changed() {
-            self.tab = [Tab::Files, Tab::Alerts, Tab::Setup][idx];
+        if widgets::segmented(
+            header,
+            &["Files", &alerts, "Mouse", "Setup"],
+            &mut idx,
+            theme,
+        )
+        .changed()
+        {
+            self.tab = [Tab::Files, Tab::Alerts, Tab::Mouse, Tab::Setup][idx];
         }
 
         let phone = Rect::from_min_size(body.min, vec2(PHONE_W, body.height()));
@@ -2132,6 +2327,7 @@ impl Module for PhoneLink {
         match self.tab {
             Tab::Files => self.files_tab(ui, content, theme),
             Tab::Alerts => self.alerts_tab(ui, content, theme),
+            Tab::Mouse => self.mouse_tab(ui, content, theme),
             Tab::Setup => self.setup_tab(ui, content, theme),
         }
         if let Some((msg, at)) = &self.toast {

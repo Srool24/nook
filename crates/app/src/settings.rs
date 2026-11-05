@@ -9,8 +9,7 @@ use nook_ui::bento::PANEL_PADDING;
 use nook_ui::module::{Module, TileCtx, TileSize};
 use nook_ui::shell::{ContentCtx, Placement};
 use nook_ui::theme::{
-    FALLBACK_ACCENT, SIZE_BODY, SIZE_ICON, SIZE_LABEL, Theme, ThemeMode, parse_hex, to_hex,
-    with_alpha,
+    FALLBACK_ACCENT, SIZE_BODY, SIZE_ICON, SIZE_LABEL, Theme, parse_hex, to_hex, with_alpha,
 };
 use nook_ui::{icons, paint, widgets};
 
@@ -19,12 +18,12 @@ pub const SETTINGS_ID: &str = "settings";
 const GAP: f32 = 8.0;
 const HEADER: f32 = 28.0;
 const ROW: f32 = 28.0;
-/// Height of the Appearance and Behavior cards (title + four rows).
-const TOP_CARD: f32 = 154.0;
+/// Height of the Appearance and Behavior cards (title + five rows).
+const TOP_CARD: f32 = 154.0 + ROW;
 /// Height of a collapsible card's clickable header.
 const DISCLOSURE: f32 = 44.0;
 /// Revealed height of each collapsible section's body.
-const BODY: [f32; 2] = [4.0 * ROW + 14.0, 2.0 * ROW + 14.0];
+const BODY: [f32; 2] = [3.0 * ROW + 14.0, 2.0 * ROW + 14.0];
 /// Page height with every section collapsed, panel padding included.
 const BASE: f32 =
     2.0 * PANEL_PADDING + HEADER + GAP + TOP_CARD + GAP + DISCLOSURE + GAP + DISCLOSURE;
@@ -135,6 +134,8 @@ pub struct PageOutput {
     pub back: bool,
     pub changed: bool,
     pub startup_toggled: bool,
+    /// "In the top bar" was switched.
+    pub top_bar_toggled: bool,
     /// "Manage plugins" was clicked.
     pub open_plugins: bool,
     /// "Check for updates" was clicked.
@@ -150,6 +151,7 @@ pub fn page(
     theme: &Theme,
     cfg: &mut Config,
     update: &Status,
+    top_bar_note: Option<&str>,
 ) -> PageOutput {
     let mut out = PageOutput::default();
     let ctx = ui.ctx().clone();
@@ -157,7 +159,23 @@ pub fn page(
     if alpha <= 0.002 {
         return out;
     }
-    let panel = cctx.panel.shrink(PANEL_PADDING);
+    // The page scrolls when the monitor has no room for all of it (a
+    // laptop at 200% with a section open).
+    let view = cctx.panel.shrink(PANEL_PADDING);
+    let body = open_section(&ctx).map_or(0.0, |i| BODY[i]);
+    let overflow = (BASE - 2.0 * PANEL_PADDING + body - view.height()).max(0.0);
+    let scroll_id = Id::new("nook-settings-scroll");
+    let mut scroll: f32 = ctx.data(|d| d.get_temp(scroll_id)).unwrap_or(0.0);
+    if overflow > 0.0
+        && ctx
+            .input(|i| i.pointer.hover_pos())
+            .is_some_and(|p| view.contains(p))
+    {
+        scroll -= ctx.input(|i| i.smooth_scroll_delta.y);
+    }
+    let scroll = scroll.clamp(0.0, overflow);
+    ctx.data_mut(|d| d.insert_temp(scroll_id, scroll));
+    let panel = view.translate(vec2(0.0, -scroll));
     let area = Area::new(Id::new("nook-settings"))
         .order(Order::Middle)
         .fixed_pos(panel.min)
@@ -166,7 +184,11 @@ pub fn page(
         .sense(Sense::hover())
         .show(&ctx, |ui| {
             ui.multiply_opacity(alpha);
-            ui.set_min_size(panel.size());
+            ui.set_min_size(view.size());
+            if overflow > 0.0 {
+                ui.set_clip_rect(view.expand2(vec2(PANEL_PADDING, 2.0)));
+                scrollbar(ui, view, scroll, overflow, theme);
+            }
 
             // Header: back button + title.
             let header = Rect::from_min_size(panel.min, vec2(panel.width(), 28.0));
@@ -204,15 +226,16 @@ pub fn page(
 
             let mut lui = card_ui(ui, left);
             section_title(&mut lui, "Appearance", theme);
-            let mut theme_idx = match cfg.theme {
-                ThemeMode::Auto => 0,
-                ThemeMode::Dark => 1,
-                ThemeMode::Light => 2,
+            // No light/dark switch here: Nook follows the system's
+            // appearance, like every other app (HIG, Dark Mode).
+            let mut mat_idx = match cfg.material {
+                Material::Acrylic => 0,
+                Material::Solid => 1,
             };
-            if row(&mut lui, "Theme", theme, |ui| {
-                widgets::segmented(ui, &["Auto", "Dark", "Light"], &mut theme_idx, theme)
+            if row(&mut lui, "Material", theme, |ui| {
+                widgets::segmented(ui, &["Glass", "Solid"], &mut mat_idx, theme)
             }) {
-                cfg.theme = [ThemeMode::Auto, ThemeMode::Dark, ThemeMode::Light][theme_idx];
+                cfg.material = [Material::Acrylic, Material::Solid][mat_idx];
                 out.changed = true;
             }
             let mut accent_idx = match cfg.accent {
@@ -223,7 +246,11 @@ pub fn page(
             if row(&mut lui, "Accent", theme, |ui| {
                 widgets::segmented(
                     ui,
-                    &["Wallpaper", "Windows", "Custom"],
+                    &[
+                        "Wallpaper",
+                        if cfg!(windows) { "Windows" } else { "System" },
+                        "Custom",
+                    ],
                     &mut accent_idx,
                     theme,
                 )
@@ -242,10 +269,33 @@ pub fn page(
                 .iter()
                 .position(|&p| p == cfg.placement)
                 .unwrap_or(1);
+            // A dragged notch goes back to a slot on any click, even on the
+            // slot it was dragged from.
+            let dragged = cfg.notch_x.is_some() || cfg.notch_y > 0.0;
             if row(&mut lui, "Position", theme, |ui| {
-                widgets::segmented(ui, &["Left", "Center", "Right"], &mut pos_idx, theme)
+                let mut resp =
+                    widgets::segmented(ui, &["Left", "Center", "Right"], &mut pos_idx, theme);
+                if dragged && resp.clicked() {
+                    resp.mark_changed();
+                }
+                resp.on_hover_text("Or drag the notch to move it anywhere")
             }) {
                 cfg.placement = Placement::ALL[pos_idx];
+                cfg.notch_x = None;
+                cfg.notch_y = 0.0;
+                out.changed = true;
+            }
+            let mut in_bar = cfg.in_top_bar;
+            let bar_tip = top_bar_note.unwrap_or(if cfg!(target_os = "linux") {
+                "The notch sits inside GNOME's top bar (through a small Shell extension Nook installs)"
+            } else {
+                "GNOME only"
+            });
+            if row(&mut lui, "In the top bar", theme, |ui| {
+                widgets::toggle(ui, &mut in_bar, theme).on_hover_text(bar_tip)
+            }) {
+                cfg.in_top_bar = in_bar;
+                out.top_bar_toggled = true;
                 out.changed = true;
             }
             let mut hide = cfg.hide_in_fullscreen;
@@ -285,6 +335,14 @@ pub fn page(
                 widgets::toggle(ui, &mut on_top, theme)
             }) {
                 cfg.on_top = on_top;
+                out.changed = true;
+            }
+            let mut notes = cfg.pill_notifications;
+            if row(&mut rui, "Notifications in the pill", theme, |ui| {
+                widgets::toggle(ui, &mut notes, theme)
+                    .on_hover_text("Run new notifications along the pill (not during Do Not Disturb)")
+            }) {
+                cfg.pill_notifications = notes;
                 out.changed = true;
             }
             let mut startup = cfg.launch_at_startup;
@@ -348,6 +406,18 @@ pub fn page(
         cctx.transform * egui::emath::TSTransform::from_translation(vec2(0.0, slide)),
     );
     out
+}
+
+/// A thin thumb along the right padding showing where the page is scrolled.
+fn scrollbar(ui: &Ui, view: Rect, scroll: f32, overflow: f32, theme: &Theme) {
+    let total = view.height() + overflow;
+    let len = (view.height() * view.height() / total).max(24.0);
+    let top = view.min.y + (view.height() - len) * (scroll / overflow);
+    let x = view.max.x + PANEL_PADDING * 0.5;
+    ui.painter().line_segment(
+        [pos2(x, top + 2.0), pos2(x, top + len - 2.0)],
+        Stroke::new(3.0, with_alpha(theme.text_faint, 0.5)),
+    );
 }
 
 /// Right end of the header: the running version and either the Update
@@ -438,7 +508,7 @@ fn advanced_summary(cfg: &Config) -> String {
     )
 }
 
-/// Material, background tint, glass opacity, accent color and film grain,
+/// Background tint, glass opacity, accent color and film grain,
 /// in two columns.
 fn customize_body(ui: &mut Ui, rect: Rect, theme: &Theme, cfg: &mut Config, out: &mut PageOutput) {
     let inner = rect.shrink2(vec2(14.0, 6.0));
@@ -458,16 +528,6 @@ fn customize_body(ui: &mut Ui, rect: Rect, theme: &Theme, cfg: &mut Config, out:
     };
 
     let mut lui = column(ui, left);
-    let mut mat_idx = match cfg.material {
-        Material::Acrylic => 0,
-        Material::Solid => 1,
-    };
-    if row(&mut lui, "Material", theme, |ui| {
-        widgets::segmented(ui, &["Glass", "Solid"], &mut mat_idx, theme)
-    }) {
-        cfg.material = [Material::Acrylic, Material::Solid][mat_idx];
-        out.changed = true;
-    }
     let mut bg_idx = match parse_hex(&cfg.background_hex) {
         None => Some(0),
         Some(c) => BACKGROUNDS.iter().position(|b| *b == Some(c)),
@@ -625,7 +685,11 @@ fn advanced_body(ui: &mut Ui, rect: Rect, theme: &Theme, cfg: &mut Config, out: 
     }
     hint(
         &mut rui,
-        "Daily: version, opens, minutes, tools used",
+        if cfg!(windows) {
+            "Daily: version, opens, minutes, tools used"
+        } else {
+            "Never sent from the Linux build"
+        },
         theme,
     );
 }
@@ -665,16 +729,18 @@ fn row(
 ) -> bool {
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(w, ROW), Sense::hover());
-    ui.painter().text(
+    let label_rect = ui.painter().text(
         pos2(rect.min.x, rect.center().y),
         Align2::LEFT_CENTER,
         label,
         Theme::font(SIZE_BODY),
         theme.text,
     );
+    // The control gets what the label leaves, with a gap between them.
+    let room = Rect::from_min_max(pos2(label_rect.max.x + 12.0, rect.min.y), rect.max);
     let mut cui = ui.new_child(
         UiBuilder::new()
-            .max_rect(rect)
+            .max_rect(room)
             .layout(Layout::right_to_left(Align::Center)),
     );
     control(&mut cui).changed()

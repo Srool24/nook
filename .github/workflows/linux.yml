@@ -1,0 +1,61 @@
+# Builds and tests the Linux port on Fedora, and packages it as an RPM.
+# A tag `v*` attaches the RPMs to that GitHub release.
+name: Linux (Fedora)
+
+on:
+  push:
+    branches: [main, fedora-linux]
+    tags: ["v*"]
+  pull_request:
+  # To rebuild by hand when a push didn't start a run.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: fedora:43
+    steps:
+      - name: Tools and libraries
+        run: |
+          dnf install -y git tar gzip cargo rust clippy rustfmt gcc gtk3-devel \
+            rpm-build desktop-file-utils libappstream-glib \
+            xorg-x11-server-Xvfb xorg-x11-xauth which dbus-daemon python3 \
+            fontconfig google-noto-sans-vf-fonts tesseract tesseract-langpack-eng
+      - uses: actions/checkout@v4
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: fedora-${{ hashFiles('Cargo.lock') }}
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Tests
+        # The X11 and D-Bus tests need a display and a session bus.
+        run: |
+          export XDG_RUNTIME_DIR=$(mktemp -d)
+          dbus-run-session -- xvfb-run -a cargo test --workspace --locked
+      - name: RPM
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          NOOK_RELEASES_REPO=${{ github.repository }} packaging/linux/build-rpm.sh
+          mkdir -p dist
+          cp ~/rpmbuild/RPMS/*/nook-*.rpm ~/rpmbuild/SRPMS/nook-*.rpm dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nook-rpm
+          path: dist/*.rpm
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          dnf install -y gh
+          gh release upload "${GITHUB_REF_NAME}" dist/*.rpm --clobber --repo "${{ github.repository }}"

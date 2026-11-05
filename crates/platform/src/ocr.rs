@@ -15,13 +15,26 @@
 //! Lines are joined with line breaks (or spaces in single-line mode).
 //! Chinese and Japanese results come back with a space between every
 //! character, so those spaces are removed.
+//!
+//! On Linux the engine is Tesseract (`dnf install tesseract` plus a
+//! `tesseract-langpack-*` per language), run on the same prepared image;
+//! its word boxes come from the TSV output.
+
+#[cfg(target_os = "linux")]
+pub use linux::{languages, recognize};
 
 use crate::capture::Frame;
+#[cfg(windows)]
 use crate::{Result, Win32Context};
+#[cfg(windows)]
 use windows::Globalization::Language;
+#[cfg(windows)]
 use windows::Graphics::Imaging::{BitmapAlphaMode, BitmapPixelFormat, SoftwareBitmap};
+#[cfg(windows)]
 use windows::Media::Ocr::OcrEngine;
+#[cfg(windows)]
 use windows::Storage::Streams::DataWriter;
+#[cfg(windows)]
 use windows::core::HSTRING;
 
 /// Selections whose longer edge is under this get scaled up.
@@ -38,6 +51,7 @@ pub struct OcrLanguage {
 }
 
 /// Languages the engine can read on this machine.
+#[cfg(windows)]
 pub fn languages() -> Vec<OcrLanguage> {
     let Ok(list) = OcrEngine::AvailableRecognizerLanguages() else {
         return Vec::new();
@@ -83,6 +97,7 @@ impl OcrText {
 
 /// Reads the text in `frame`. `language` is a BCP-47 tag; `None` uses the
 /// first of the user's display languages the engine supports.
+#[cfg(windows)]
 pub fn recognize(frame: &Frame, language: Option<&str>) -> Result<OcrText> {
     let engine = match language {
         Some(tag) => {
@@ -254,6 +269,239 @@ fn squeeze_cjk(s: &str) -> String {
         out.push(c);
     }
     out
+}
+
+#[cfg(target_os = "linux")]
+mod linux {
+    use super::{OcrLanguage, OcrText, OcrWord, PADDING, is_cjk, prepare, squeeze_cjk};
+    use crate::capture::Frame;
+    use crate::sys::cmd;
+    use crate::{PlatformError, Result};
+
+    /// Tesseract's language codes and their BCP-47 tags and names.
+    const LANGS: &[(&str, &str, &str)] = &[
+        ("eng", "en", "English"),
+        ("heb", "he", "Hebrew"),
+        ("ara", "ar", "Arabic"),
+        ("deu", "de", "German"),
+        ("fra", "fr", "French"),
+        ("spa", "es", "Spanish"),
+        ("ita", "it", "Italian"),
+        ("por", "pt", "Portuguese"),
+        ("nld", "nl", "Dutch"),
+        ("rus", "ru", "Russian"),
+        ("ukr", "uk", "Ukrainian"),
+        ("pol", "pl", "Polish"),
+        ("ces", "cs", "Czech"),
+        ("tur", "tr", "Turkish"),
+        ("ell", "el", "Greek"),
+        ("swe", "sv", "Swedish"),
+        ("dan", "da", "Danish"),
+        ("nor", "nb", "Norwegian"),
+        ("fin", "fi", "Finnish"),
+        ("hun", "hu", "Hungarian"),
+        ("ron", "ro", "Romanian"),
+        ("bul", "bg", "Bulgarian"),
+        ("hin", "hi", "Hindi"),
+        ("tha", "th", "Thai"),
+        ("vie", "vi", "Vietnamese"),
+        ("ind", "id", "Indonesian"),
+        ("kor", "ko", "Korean"),
+        ("jpn", "ja", "Japanese"),
+        ("chi_sim", "zh-Hans", "Chinese (Simplified)"),
+        ("chi_tra", "zh-Hant", "Chinese (Traditional)"),
+        ("fas", "fa", "Persian"),
+    ];
+
+    fn installed() -> Vec<String> {
+        cmd::output("tesseract", &["--list-langs"])
+            .map(|out| {
+                out.lines()
+                    .skip(1)
+                    .map(|l| l.trim().to_owned())
+                    .filter(|l| !l.is_empty() && l != "osd" && l != "equ")
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn tag_of(code: &str) -> String {
+        LANGS
+            .iter()
+            .find(|(c, _, _)| *c == code)
+            .map_or_else(|| code.to_owned(), |(_, t, _)| (*t).to_owned())
+    }
+
+    /// Languages the engine can read on this machine.
+    pub fn languages() -> Vec<OcrLanguage> {
+        installed()
+            .into_iter()
+            .map(|code| {
+                let (tag, name) = LANGS.iter().find(|(c, _, _)| *c == code).map_or_else(
+                    || (code.clone(), code.clone()),
+                    |(_, t, n)| ((*t).into(), (*n).into()),
+                );
+                OcrLanguage { tag, name }
+            })
+            .collect()
+    }
+
+    /// The Tesseract languages to use: the asked tag's, or the user's
+    /// language plus English (most screens mix the two).
+    fn pick(language: Option<&str>, installed: &[String]) -> Option<String> {
+        let code_for = |tag: &str| {
+            let lower = tag.to_ascii_lowercase();
+            LANGS
+                .iter()
+                .find(|(_, t, _)| t.to_ascii_lowercase() == lower)
+                .or_else(|| {
+                    let base = lower.split(['-', '_']).next().unwrap_or("");
+                    LANGS
+                        .iter()
+                        .find(|(_, t, _)| t.to_ascii_lowercase() == base)
+                })
+                .map(|(c, _, _)| (*c).to_owned())
+                .filter(|c| installed.contains(c))
+        };
+        if let Some(tag) = language {
+            return code_for(tag);
+        }
+        let env = std::env::var("LANGUAGE")
+            .ok()
+            .and_then(|l| l.split(':').next().map(str::to_owned))
+            .filter(|l| !l.is_empty())
+            .or_else(|| std::env::var("LC_ALL").ok())
+            .or_else(|| std::env::var("LANG").ok())
+            .unwrap_or_default();
+        let base = env.split(['.', '@']).next().unwrap_or("").replace('_', "-");
+        let mut codes: Vec<String> = Vec::new();
+        if let Some(c) = code_for(&base) {
+            codes.push(c);
+        }
+        if installed.iter().any(|c| c == "eng") && !codes.iter().any(|c| c == "eng") {
+            codes.push("eng".into());
+        }
+        if codes.is_empty() {
+            codes.extend(installed.first().cloned());
+        }
+        (!codes.is_empty()).then(|| codes.join("+"))
+    }
+
+    /// Reads the text in `frame`. `language` is a BCP-47 tag; `None` uses
+    /// the user's language (with English) when its pack is installed.
+    pub fn recognize(frame: &Frame, language: Option<&str>) -> Result<OcrText> {
+        if cmd::which("tesseract").is_none() {
+            return Err(PlatformError::Other(
+                "Tesseract is not installed (sudo dnf install tesseract)".into(),
+            ));
+        }
+        let codes = pick(language, &installed()).ok_or_else(|| {
+            PlatformError::Other("no OCR language installed (tesseract-langpack-eng)".into())
+        })?;
+        let prepared = prepare(frame, 10_000);
+        let png = prepared.encode_png()?;
+        let path = std::env::temp_dir().join(format!("nook-ocr-{}.png", std::process::id()));
+        std::fs::write(&path, png).map_err(|e| PlatformError::other("writing the OCR image", e))?;
+        let out = cmd::output(
+            "tesseract",
+            &[
+                &path.display().to_string(),
+                "stdout",
+                "-l",
+                &codes,
+                "--psm",
+                "3",
+                "tsv",
+            ],
+        );
+        let _ = std::fs::remove_file(&path);
+        let tsv = out?;
+        let first = codes.split('+').next().unwrap_or("eng");
+        let tag = tag_of(first);
+        let sx = (prepared.width - 2 * PADDING) as f32 / frame.width.max(1) as f32;
+        let sy = (prepared.height - 2 * PADDING) as f32 / frame.height.max(1) as f32;
+        let mut text = parse_tsv(&tsv, PADDING as f32, sx, sy);
+        if is_cjk(&tag) {
+            for l in &mut text.lines {
+                *l = squeeze_cjk(l);
+            }
+        }
+        text.language = tag;
+        Ok(text)
+    }
+
+    /// Lines and word boxes from Tesseract's TSV, boxes mapped back from
+    /// the prepared image (padding `pad`, scale `sx`, `sy`).
+    pub(super) fn parse_tsv(tsv: &str, pad: f32, sx: f32, sy: f32) -> OcrText {
+        let mut lines: Vec<String> = Vec::new();
+        let mut words: Vec<OcrWord> = Vec::new();
+        let mut current: Option<(u32, u32, u32)> = None;
+        for row in tsv.lines().skip(1) {
+            let f: Vec<&str> = row.split('\t').collect();
+            if f.len() < 12 || f[0] != "5" {
+                continue;
+            }
+            let text = f[11].trim();
+            if text.is_empty() {
+                continue;
+            }
+            let num = |i: usize| f[i].parse::<u32>().unwrap_or(0);
+            let num_f = |i: usize| f[i].parse::<f32>().unwrap_or(0.0);
+            let key = (num(2), num(3), num(4));
+            if current != Some(key) {
+                current = Some(key);
+                lines.push(String::new());
+            }
+            let line = lines.len() - 1;
+            let l = &mut lines[line];
+            if !l.is_empty() {
+                l.push(' ');
+            }
+            l.push_str(text);
+            words.push(OcrWord {
+                text: text.to_owned(),
+                line,
+                rect: (
+                    (num_f(6) - pad) / sx,
+                    (num_f(7) - pad) / sy,
+                    num_f(8) / sx,
+                    num_f(9) / sy,
+                ),
+            });
+        }
+        OcrText {
+            lines,
+            words,
+            language: String::new(),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn parses_tesseract_tsv() {
+            let tsv = "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n\
+1\t1\t0\t0\t0\t0\t0\t0\t500\t200\t-1\t\n\
+5\t1\t1\t1\t1\t1\t24\t24\t60\t20\t96\tHello\n\
+5\t1\t1\t1\t1\t2\t94\t24\t70\t20\t95\tworld\n\
+5\t1\t1\t1\t2\t1\t24\t64\t40\t20\t91\tagain\n";
+            let t = parse_tsv(tsv, 24.0, 2.0, 2.0);
+            assert_eq!(t.lines, ["Hello world", "again"]);
+            assert_eq!(t.words.len(), 3);
+            assert_eq!(t.words[1].line, 0);
+            assert_eq!(t.words[2].line, 1);
+            assert_eq!(t.words[0].rect, (0.0, 0.0, 30.0, 10.0));
+        }
+
+        #[test]
+        fn picks_languages() {
+            let have: Vec<String> = ["eng", "heb"].map(String::from).to_vec();
+            assert_eq!(pick(Some("he-IL"), &have).as_deref(), Some("heb"));
+            assert_eq!(pick(Some("de"), &have), None);
+        }
+    }
 }
 
 #[cfg(test)]

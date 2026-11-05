@@ -894,11 +894,15 @@ mod tests {
 
     #[test]
     fn titles_and_clock() {
+        let dir = if cfg!(windows) { "C:\\m\\" } else { "/m/" };
         assert_eq!(
-            title(Path::new("C:\\m\\Memo 2026-10-20 14-32-05.wav")),
+            title(Path::new(&format!("{dir}Memo 2026-10-20 14-32-05.wav"))),
             "20 Oct, 14:32"
         );
-        assert_eq!(title(Path::new("C:\\m\\Groceries.wav")), "Groceries");
+        assert_eq!(
+            title(Path::new(&format!("{dir}Groceries.wav"))),
+            "Groceries"
+        );
         assert_eq!(clock(75.4), "1:15");
         assert_eq!(wav_secs(44 + 88_200), 1.0);
     }

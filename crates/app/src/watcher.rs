@@ -26,7 +26,17 @@ pub struct SystemState {
     pub battery: Option<system::Battery>,
     /// Hash of the wallpaper's path; changes when the wallpaper does.
     pub wallpaper: u64,
+    /// No keyboard or mouse input for [`ASLEEP_AFTER`] (the pill's eyes
+    /// close).
+    pub asleep: bool,
+    /// No input for [`DROWSY_AFTER`] (heavy lids).
+    pub drowsy: bool,
 }
+
+/// Idle time after which the session counts as asleep.
+pub const ASLEEP_AFTER: Duration = Duration::from_secs(60);
+/// Idle time after which the eyes get heavy.
+pub const DROWSY_AFTER: Duration = Duration::from_secs(40);
 
 /// Shared knobs the UI can change without restarting the thread.
 #[derive(Default)]
@@ -48,6 +58,7 @@ pub fn sample(own: Hwnd, mode_cursor: bool) -> SystemState {
     } else {
         monitor::primary()
     };
+    let idle = system::idle_time();
     SystemState {
         fullscreen: fullscreen::foreground_is_fullscreen(own),
         covered: nook_platform::window::is_covered(own),
@@ -62,6 +73,8 @@ pub fn sample(own: Hwnd, mode_cursor: bool) -> SystemState {
             system::wallpaper_path().hash(&mut h);
             h.finish()
         },
+        asleep: idle.is_some_and(|t| t >= ASLEEP_AFTER),
+        drowsy: idle.is_some_and(|t| t >= DROWSY_AFTER),
     }
 }
 

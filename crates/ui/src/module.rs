@@ -59,6 +59,11 @@ pub trait Module: Send {
     fn collapsed_badge(&self) -> Option<Badge> {
         None
     }
+    /// One line the collapsed pill scrolls while this module has news
+    /// (what is playing), with its glyph.
+    fn ticker(&self) -> Option<(&'static str, String)> {
+        None
+    }
     /// Draws the tile body. The tile background is drawn by the shell; `ui`
     /// is already clipped and inset to the tile's content area.
     fn ui_tile(&mut self, ui: &mut egui::Ui, ctx: &mut TileCtx<'_>);

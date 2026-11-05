@@ -8,7 +8,7 @@
 //! times each built-in tool was used. Plugin names are never sent. The
 //! counts wait in `%APPDATA%\Nook\usage.json` until a ping goes through.
 //! Settings > "Anonymous usage stats" turns all of it off, and copies Setup
-//! didn't install (dev builds) never send anything.
+//! didn't install (dev builds) and Linux builds never send anything.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
@@ -83,8 +83,9 @@ impl Stats {
             builtin,
             open_since: None,
         };
-        if crate::update::installed_dir().is_none() {
-            // Dev builds and loose exes would only skew the numbers.
+        // Dev builds and loose exes would only skew the numbers, and the
+        // Linux port does not report to the Windows project's counter.
+        if cfg!(not(windows)) || crate::update::installed_dir().is_none() {
             stats.enabled.store(false, Ordering::Relaxed);
             return stats;
         }

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.geguchh024.Nook</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Nook</name>
+  <summary>A floating notch utility hub</summary>
+  <description>
+    <p>
+      A small glass pill sits at the top of the screen. Hover it and it opens
+      into a grid of tools; move away and it folds back.
+    </p>
+    <ul>
+      <li>Timer and stopwatch, Coffee (keep awake), clipboard history, media controls</li>
+      <li>Text extractor (OCR), color picker, Google Lens search, font detector, screenshots</li>
+      <li>Draw on screen, QR codes, calculator, voice memos, notes, calendar</li>
+      <li>System monitor, wallpaper browser, file shelf, quick launch</li>
+      <li>Phone link: LocalSend file transfer, scrcpy mirroring, notifications</li>
+      <li>Plugins in any language</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">nook.desktop</launchable>
+  <url type="homepage">https://nooknotch.xyz/</url>
+  <url type="vcs-browser">https://github.com/Geguchh024/nook</url>
+  <developer id="io.github.geguchh024">
+    <name>The Nook contributors</name>
+  </developer>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.2.0" date="2026-10-27"/>
+  </releases>
+</component>

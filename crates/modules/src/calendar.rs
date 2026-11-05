@@ -10,7 +10,7 @@
 use egui::{Align2, Color32, Id, Rect, Sense, Ui, pos2, vec2};
 use nook_platform::system;
 use nook_ui::module::{Badge, Module, TileCtx, TileSize};
-use nook_ui::theme::{SIZE_BODY, SIZE_LABEL, Theme, mix, with_alpha};
+use nook_ui::theme::{SIZE_BODY, SIZE_CAPTION, SIZE_LABEL, Theme, mix, with_alpha};
 use nook_ui::{anim, icons, paint, widgets};
 use std::time::Duration;
 
@@ -443,7 +443,7 @@ impl Calendar {
                 ),
                 Align2::CENTER_CENTER,
                 iso_week(row_day + i64::from((7 - self.week_start) % 7).min(6)).to_string(),
-                Theme::font(SIZE_LABEL - 2.0),
+                Theme::font(SIZE_CAPTION),
                 with_alpha(theme.text_faint, 0.8 * alpha),
             );
             for col in 0..7 {
@@ -831,7 +831,7 @@ impl Module for Calendar {
                 c - vec2(0.0, 10.0),
                 Align2::CENTER_CENTER,
                 wd.to_uppercase(),
-                Theme::font_semibold(SIZE_LABEL - 2.0),
+                Theme::font_semibold(SIZE_CAPTION),
                 accent,
             );
             painter.text(
@@ -871,7 +871,7 @@ impl Module for Calendar {
                 c - vec2(0.0, 11.0),
                 Align2::CENTER_CENTER,
                 wd.to_uppercase(),
-                Theme::font_semibold(SIZE_LABEL - 2.0),
+                Theme::font_semibold(SIZE_CAPTION),
                 accent,
             );
             painter.text(

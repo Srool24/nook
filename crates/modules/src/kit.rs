@@ -191,9 +191,11 @@ pub fn field(
             .max_rect(inner)
             .layout(Layout::left_to_right(Align::Center)),
     );
+    let align = nook_ui::widgets::reading_align(text);
     child.add(
         TextEdit::singleline(text)
             .id(id)
+            .horizontal_align(align)
             .frame(egui::Frame::NONE)
             .font(font)
             .text_color(theme.text)
@@ -359,7 +361,7 @@ pub fn wheel_lines(ctx: &egui::Context) -> f32 {
 
 /// Persistent `key=value` settings for a module, one per line.
 pub fn settings_path(file: &str) -> Option<std::path::PathBuf> {
-    std::env::var_os("APPDATA").map(|a| std::path::PathBuf::from(a).join("Nook").join(file))
+    nook_platform::shell::app_dir().map(|d| d.join(file))
 }
 
 pub fn read_settings(file: &str) -> Vec<(String, String)> {

@@ -7,7 +7,8 @@
 //! favicons). Click to open. The pencil lets you drag items into a new
 //! order or remove them. Made Wide or Large, the tile itself shows the
 //! first few for one-click launching. The list is kept in
-//! `%APPDATA%\Nook\launch.txt`.
+//! `%APPDATA%\Nook\launch.txt` (`~/.config/nook/launch.txt` on Linux, where
+//! apps are their `.desktop` entries).
 
 use egui::{
     Align2, Color32, ColorImage, Id, Rect, Sense, TextureHandle, TextureOptions, Ui, pos2, vec2,
@@ -51,6 +52,7 @@ fn list_file() -> Option<PathBuf> {
     kit::settings_path("launch.txt")
 }
 
+#[cfg(windows)]
 fn windir() -> PathBuf {
     PathBuf::from(std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into()))
 }
@@ -66,6 +68,11 @@ fn icon_source(target: &str) -> Option<PathBuf> {
     if p.is_absolute() {
         return p.exists().then(|| p.to_path_buf());
     }
+    #[cfg(not(windows))]
+    if target.ends_with(".desktop") {
+        return shell::find_app(target);
+    }
+    #[cfg(windows)]
     if target.to_lowercase().ends_with(".exe") {
         let candidates = [
             windir().join("System32").join(target),
@@ -81,9 +88,15 @@ fn glyph(target: &str) -> &'static str {
     let t = target.to_lowercase();
     if is_url(&t) {
         icons::GLOBE
-    } else if t.starts_with("ms-settings:") {
+    } else if t.starts_with("ms-settings:") || t.contains("org.gnome.settings") {
         icons::GEAR_SIX
-    } else if t.contains("wt.exe") || t.contains("cmd.exe") || t.contains("powershell") {
+    } else if t.contains("wt.exe")
+        || t.contains("cmd.exe")
+        || t.contains("powershell")
+        || t.contains("ptyxis")
+        || t.contains("terminal")
+        || t.contains("org.gnome.console")
+    {
         icons::TERMINAL_WINDOW
     } else if Path::new(target).is_dir() {
         icons::FOLDER
@@ -115,6 +128,12 @@ fn name_for(target: &str) -> String {
         return "Settings".into();
     }
     let p = Path::new(t);
+    #[cfg(not(windows))]
+    if t.ends_with(".desktop")
+        && let Some(name) = shell::app_name(p)
+    {
+        return name;
+    }
     if p.parent().is_none() || t.ends_with(":\\") {
         return t.to_owned();
     }
@@ -123,6 +142,65 @@ fn name_for(target: &str) -> String {
         .unwrap_or_else(|| t.to_owned())
 }
 
+/// Files, Downloads, Settings, System Monitor, a terminal and a text
+/// editor: GNOME's apps where they are installed.
+#[cfg(not(windows))]
+fn defaults() -> Vec<Item> {
+    let app = |ids: &[&str]| {
+        ids.iter()
+            .find_map(|id| shell::find_app(id))
+            .map(|p| p.display().to_string())
+    };
+    let mut items = Vec::new();
+    let mut push = |name: &str, target: Option<String>| {
+        if let Some(t) = target {
+            items.push(Item::new(name, t));
+        }
+    };
+    push(
+        "Files",
+        app(&["org.gnome.Nautilus.desktop", "org.kde.dolphin.desktop"]),
+    );
+    push(
+        "Downloads",
+        shell::downloads_dir().map(|d| d.display().to_string()),
+    );
+    push(
+        "Settings",
+        app(&[
+            "org.gnome.Settings.desktop",
+            "gnome-control-center.desktop",
+            "systemsettings.desktop",
+        ]),
+    );
+    push(
+        "System Monitor",
+        app(&[
+            "org.gnome.SystemMonitor.desktop",
+            "gnome-system-monitor.desktop",
+        ]),
+    );
+    push(
+        "Terminal",
+        app(&[
+            "org.gnome.Ptyxis.desktop",
+            "org.gnome.Terminal.desktop",
+            "org.gnome.Console.desktop",
+            "org.kde.konsole.desktop",
+        ]),
+    );
+    push(
+        "Text Editor",
+        app(&[
+            "org.gnome.TextEditor.desktop",
+            "org.gnome.gedit.desktop",
+            "org.kde.kate.desktop",
+        ]),
+    );
+    items
+}
+
+#[cfg(windows)]
 fn defaults() -> Vec<Item> {
     let mut items = vec![Item::new(
         "Explorer",
@@ -456,7 +534,11 @@ impl QuickLaunch {
             ui,
             field,
             &mut self.draft,
-            "Paste a path, a website or ms-settings: link",
+            if cfg!(windows) {
+                "Paste a path, a website or ms-settings: link"
+            } else {
+                "Paste a path, a website or an app's .desktop file"
+            },
             id,
             Theme::font(SIZE_BODY),
             theme,
@@ -725,15 +807,27 @@ mod tests {
     fn names_and_kinds() {
         assert_eq!(name_for("https://www.github.com/rust"), "Github");
         assert_eq!(name_for("ms-settings:display"), "Settings");
-        assert_eq!(
-            name_for("C:\\Tools\\Paint.NET\\paintdotnet.exe"),
-            "paintdotnet"
-        );
-        assert_eq!(name_for("D:\\"), "D:\\");
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                name_for("C:\\Tools\\Paint.NET\\paintdotnet.exe"),
+                "paintdotnet"
+            );
+            assert_eq!(name_for("D:\\"), "D:\\");
+            assert!(icon_source("notepad.exe").is_some());
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(name_for("/opt/tools/paint.sh"), "paint");
+            assert_eq!(name_for("/"), "/");
+            assert_eq!(
+                glyph("/usr/share/applications/org.gnome.Ptyxis.desktop"),
+                icons::TERMINAL_WINDOW
+            );
+        }
         assert!(is_url("www.example.com"));
         assert_eq!(glyph("https://x.y"), icons::GLOBE);
         assert_eq!(glyph("ms-settings:"), icons::GEAR_SIX);
-        assert!(icon_source("notepad.exe").is_some());
         assert_eq!(hue_color("a"), hue_color("a"));
     }
 }

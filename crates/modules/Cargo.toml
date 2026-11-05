@@ -28,3 +28,7 @@ image.workspace = true
 zip = { version = "7.4", default-features = false, features = ["deflate-flate2"] }
 # QR code encoding (pure Rust, no dependencies).
 qrcodegen = "1.8"
+# The phone as a touchpad: a self-signed certificate (motion sensors need a
+# secure page) and WebSocket for the input stream.
+rcgen = { version = "0.13", default-features = false, features = ["ring"] }
+tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }
